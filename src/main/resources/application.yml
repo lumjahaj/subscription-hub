@@ -26,8 +26,8 @@ management:
 
 logging:
   pattern:
+    level: "%5p [tenant:%X{tenantId:-?} req:%X{requestId:-?}]"
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg tenant=%X{tenant} requestId=%X{requestId}%n"
   level:
     root: INFO
     org.springframework: INFO
-
