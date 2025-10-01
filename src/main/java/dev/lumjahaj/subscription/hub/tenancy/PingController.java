@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.tenancy;
 
+import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 

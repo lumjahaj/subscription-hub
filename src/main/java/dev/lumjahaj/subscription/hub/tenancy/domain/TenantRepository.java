@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.tenancy;
+package dev.lumjahaj.subscription.hub.tenancy.domain;
 
 import java.util.Optional;
 

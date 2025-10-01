@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.tenancy;
+package dev.lumjahaj.subscription.hub.tenancy.api;
 
 import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;

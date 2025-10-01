@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.tenancy;
+package dev.lumjahaj.subscription.hub.tenancy.api;
 
 public class UnknownTenantException extends RuntimeException {
     public UnknownTenantException(String tenantId) {

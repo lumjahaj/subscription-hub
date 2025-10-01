@@ -44,7 +44,7 @@ CREATE TABLE plan (
                       name            text        NOT NULL,
                       interval        varchar(16) NOT NULL,      -- e.g., MONTH, YEAR
                       amount_cents    bigint      NOT NULL,      -- base price in minor units
-                      currency        char(3)     NOT NULL DEFAULT 'EUR',
+                      currency        varchar(3)     NOT NULL DEFAULT 'EUR',
                       trial_days      int         NOT NULL DEFAULT 0,
                       created_at      timestamptz NOT NULL DEFAULT now(),
                       updated_at      timestamptz NOT NULL DEFAULT now(),
