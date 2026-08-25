@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.catalog;
+package dev.lumjahaj.subscription.hub.catalog.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
 import jakarta.persistence.*;
