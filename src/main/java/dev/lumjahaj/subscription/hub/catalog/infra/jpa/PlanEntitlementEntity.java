@@ -2,6 +2,8 @@ package dev.lumjahaj.subscription.hub.catalog.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Table(
@@ -21,6 +23,7 @@ public class PlanEntitlementEntity extends TenantScoped {
     @Column(name = "key", length = 64, nullable = false)
     private String key;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "value_json", columnDefinition = "jsonb", nullable = false)
     private String valueJson; // keep as String; parse to/from JSON in service/DTO
 
