@@ -1,5 +1,8 @@
-package dev.lumjahaj.subscription.hub.tenancy.api;
+package dev.lumjahaj.subscription.hub.common.api;
 
+import dev.lumjahaj.subscription.hub.common.logging.MdcKeys;
+import dev.lumjahaj.subscription.hub.tenancy.api.MissingTenantException;
+import dev.lumjahaj.subscription.hub.tenancy.api.UnknownTenantException;
 import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -13,7 +16,7 @@ public class ProblemDetailsAdvice {
     private ProblemDetail base(HttpStatus status, String code, String message) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(status, message);
         pd.setProperty("code", code);
-        pd.setProperty("requestId", MDC.get(TenantResolverFilter.MDC_REQUEST));
+        pd.setProperty("requestId", MDC.get(MdcKeys.REQUEST_ID));
         return pd;
     }
 
@@ -38,5 +41,15 @@ public class ProblemDetailsAdvice {
     @ExceptionHandler(Exception.class)
     ProblemDetail handleGeneric(Exception ex) {
         return base(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Unexpected error");
+    }
+
+    @ExceptionHandler(ResourceAlreadyExistsException.class)
+    ProblemDetail handleAlreadyExists(ResourceAlreadyExistsException ex) {
+        return base(HttpStatus.CONFLICT, ex.getCode(), ex.getMessage());
+    }
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    ProblemDetail handleNotFound(ResourceNotFoundException ex) {
+        return base(HttpStatus.NOT_FOUND, ex.getCode(), ex.getMessage());
     }
 }

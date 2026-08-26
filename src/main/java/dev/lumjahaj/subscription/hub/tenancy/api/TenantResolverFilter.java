@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.tenancy.api;
 
+import dev.lumjahaj.subscription.hub.common.logging.MdcKeys;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantRepository;
 import jakarta.servlet.FilterChain;
@@ -22,8 +23,8 @@ import java.util.UUID;
 public class TenantResolverFilter extends OncePerRequestFilter {
 
     public static final String TENANT_HEADER = "X-Tenant-Id";
-    public static final String MDC_TENANT = "tenantId";
-    public static final String MDC_REQUEST = "requestId";
+    public static final String MDC_TENANT = MdcKeys.TENANT_ID;
+    public static final String MDC_REQUEST = MdcKeys.REQUEST_ID;
 
     private final TenantRepository tenants;
     private final HandlerExceptionResolver resolver;
