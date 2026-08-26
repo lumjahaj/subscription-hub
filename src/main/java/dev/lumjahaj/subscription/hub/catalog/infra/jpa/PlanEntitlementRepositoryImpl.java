@@ -4,6 +4,7 @@ import dev.lumjahaj.subscription.hub.catalog.domain.PlanEntitlementRepository;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
@@ -23,5 +24,10 @@ public class PlanEntitlementRepositoryImpl implements PlanEntitlementRepository 
     @Override
     public List<PlanEntitlementEntity> findByTenantIdAndPlanId(String tenantId, UUID planId) {
         return jpaRepository.findByTenantIdAndPlanId(tenantId, planId);
+    }
+
+    @Override
+    public Optional<PlanEntitlementEntity> findByTenantIdAndPlanIdAndKey(String tenantId, UUID planId, String key) {
+        return jpaRepository.findByTenantIdAndPlanIdAndKey(tenantId, planId, key);
     }
 }
