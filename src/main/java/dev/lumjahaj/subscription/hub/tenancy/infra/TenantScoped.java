@@ -3,6 +3,7 @@ package dev.lumjahaj.subscription.hub.tenancy.infra;
 import jakarta.persistence.Column;
 import jakarta.persistence.EntityListeners;
 import jakarta.persistence.MappedSuperclass;
+import org.hibernate.annotations.TenantId;
 
 import java.time.Instant;
 
@@ -10,6 +11,11 @@ import java.time.Instant;
 @EntityListeners(TenantEntityListener.class)
 public abstract class TenantScoped {
 
+    // @TenantId makes Hibernate append "tenant_id = :resolvedTenant" to
+    // every query it builds for a TenantScoped entity, using
+    // TenantIdentifierResolver — a safety net on top of the explicit
+    // findByTenantId... methods, in case one is ever missed.
+    @TenantId
     @Column(name = "tenant_id", nullable = false, length = 64)
     private String tenantId;
 
