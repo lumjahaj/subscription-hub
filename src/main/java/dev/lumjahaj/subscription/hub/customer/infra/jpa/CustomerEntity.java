@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.customer;
+package dev.lumjahaj.subscription.hub.customer.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
 import jakarta.persistence.*;
@@ -23,7 +23,6 @@ public class CustomerEntity extends TenantScoped {
     @Column(nullable = false)
     private String name;
 
-    // getters/setters
     public java.util.UUID getId() {return id;}
     public void setId(java.util.UUID id) {this.id = id;}
     public String getExternalId() {return externalId;}
