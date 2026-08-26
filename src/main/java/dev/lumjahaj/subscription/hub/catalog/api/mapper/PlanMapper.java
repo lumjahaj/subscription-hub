@@ -30,8 +30,13 @@ public final class PlanMapper {
     public static PlanResponse toResponse(PlanEntity entity) {
         return new PlanResponse(
                 entity.getId(),
+                entity.getProduct().getCode(),
                 entity.getCode(),
                 entity.getName(),
+                entity.getInterval(),
+                entity.getAmountCents(),
+                entity.getCurrency(),
+                entity.getTrialDays(),
                 entity.getCreatedAt(),
                 entity.getUpdatedAt()
         );
