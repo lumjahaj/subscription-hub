@@ -118,9 +118,11 @@ on every tenant-owned table.
   `UnknownTenantException` → 401 `TENANT_UNKNOWN`.
 - App services read the tenant via `TenantContext.getTenantId()` directly.
 
-**Every repository query must be tenant-scoped.** `findByTenantIdAndCode(...)`,
-never `findByCode(...)`. See §9 — this is currently enforced only by convention,
-which is the project's main architectural weakness.
+**Every repository query must still be tenant-scoped explicitly.**
+`findByTenantIdAndCode(...)`, never `findByCode(...)`. This is no longer the
+*only* thing enforcing isolation — see §9 — but it stays mandatory as defense
+in depth: the structural backstop only covers Hibernate-mediated queries, not
+a future native/`nativeQuery = true` one.
 
 ---
 
@@ -215,16 +217,27 @@ Seeded tenants for local dev: `acme`, `demo`.
 - Flyway V1 baseline schema; V2 adds `PAUSED`
 - OpenAPI/Swagger — `/swagger-ui/index.html`, `/v3/api-docs`, reusable Problem
   schema attached to error responses
+- **Structural tenant isolation** — Hibernate `@TenantId` on
+  `TenantScoped.tenantId`, resolved via `tenancy/infra/TenantIdentifierResolver`
+  (wraps `TenantContext`), wired through `JpaConfig`'s
+  `HibernatePropertiesCustomizer`. Spring Boot does **not** auto-detect a
+  `CurrentTenantIdentifierResolver` bean — `hibernate.tenant_identifier_resolver`
+  has to be set explicitly, or repository bootstrap itself fails at startup.
+  Adds an automatic `tenant_id =` predicate to every Hibernate-mediated query,
+  on top of (not instead of) the explicit `findByTenantId...` convention.
 - **Catalog** — Product, Plan, PlanEntitlement: full trio, DTOs, mappers,
   validation, services, controllers. Tested via `.http`.
 - **Customer** — same, `POST`/`GET /api/customers`. Tested via `.http`.
-- **Subscription** — entity, trio, DTOs, mapper, service, controller written.
-  Creation logic: if `plan.trialDays > 0` → `TRIALING`, period ends
-  `now + trialDays`; else `ACTIVE`, period ends `now + 1 interval`.
-  `nextRenewal = currentPeriodEnd`. `cancelAt`/`canceledAt` stay null.
-  ⚠️ **Not yet verified end-to-end** — needs compile + `subscription.http` run.
-
-**Written but not committed:** mapper unit tests for Product, Plan, PlanEntitlement.
+- **Subscription** — entity, trio, DTOs, mapper, service, controller. Creation
+  logic: if `plan.trialDays > 0` → `TRIALING`, period ends `now + trialDays`;
+  else `ACTIVE`, period ends `now + 1 interval`. `nextRenewal = currentPeriodEnd`.
+  `cancelAt`/`canceledAt` stay null. Verified end-to-end via `subscription.http`
+  (trial/no-trial creation, not-found, tenant isolation).
+- Mapper unit tests committed for Product, Plan, PlanEntitlement, Customer,
+  Subscription, with shared validator setup extracted.
+- CI — GitHub Actions workflow running `mvn verify` against a real Postgres
+  service container on every push/PR to `main`.
+- README covering architecture, multi-tenancy model, and local setup.
 
 **Endpoints:**
 ```
@@ -241,11 +254,10 @@ POST GET /api/subscriptions[?customerId=]
 ## 8. Roadmap
 
 Immediate:
-1. Verify Subscription end-to-end, commit
-2. Subscription state transitions — cancel, pause/resume, with a real transition
+1. Subscription state transitions — cancel, pause/resume, with a real transition
    guard (can't cancel a canceled subscription, can't resume one that isn't
    paused). This is where distinct business-rule exceptions belong.
-3. Renewal processing — scheduled job advancing `TRIALING → ACTIVE` and rolling
+2. Renewal processing — scheduled job advancing `TRIALING → ACTIVE` and rolling
    billing periods. ⚠️ `TenantContext` is a ThreadLocal populated by a servlet
    filter; background jobs have no request, so tenant scoping must be handled
    explicitly there.
@@ -264,12 +276,19 @@ feature module does.
 
 **Architectural**
 
-- **Tenant isolation is convention-only.** Every service must remember to scope
-  its queries; one omission is a cross-tenant leak with nothing to catch it.
-  Options: Hibernate `@Filter` + `@TenantId`, or Postgres row-level security
-  with a session variable. Making isolation structural — and being able to
-  explain the tradeoffs — is the single highest-value improvement here, given
-  multi-tenancy is the project's headline concept.
+- **Tenant isolation has a structural backstop now, but isn't fully closed.**
+  Hibernate `@TenantId` (not `@Filter` — that's opt-in per `Session` and easy
+  to forget to enable, so it's not worth using once `@TenantId` is in place)
+  adds an automatic `tenant_id =` predicate to every Hibernate-mediated query,
+  resolved from the same `TenantContext` via `TenantIdentifierResolver`. It
+  does **not** protect native/`nativeQuery = true` queries (none exist yet),
+  background jobs that never populate `TenantContext`, or anything outside
+  Hibernate entirely (a raw JDBC script, a future reporting tool). Postgres
+  row-level security remains the stronger, DB-level option for those cases —
+  deliberately not done yet, because verifying it properly needs a real
+  Testcontainers integration test (see Testing gap below) and correct
+  `SET LOCAL`/HikariCP wiring; the plan is to pair the two rather than ship
+  RLS unverified.
 - **Check-then-save uniqueness race.** `findByTenantIdAndCode(...).ifPresent(throw)`
   followed by `save(...)` isn't atomic. The DB constraint catches it, but the
   resulting `DataIntegrityViolationException` currently falls through to a
@@ -280,15 +299,14 @@ feature module does.
   directly; the JSON shape isn't a stable API contract. A small `PagedResponse<T>`
   wrapper would be more honest as a public API.
 
-**Testing and CI — the biggest portfolio gap**
+**Testing — still the biggest portfolio gap**
 
-- Mapper unit tests exist but aren't committed. Commit them.
-- No integration tests. Testcontainers + PostgreSQL, asserting the rules that
-  actually matter: **tenant isolation** (tenant A cannot read/modify tenant B's
-  data through any endpoint), subscription state transitions, period
-  calculations, and later billing totals.
-- No CI. A GitHub Actions workflow running `mvn verify` on every push is a
-  strong, cheap portfolio signal.
+- Mapper unit tests and CI (`mvn verify` on every push) are in place. What's
+  missing is integration tests: Testcontainers + PostgreSQL, asserting the
+  rules that actually matter — **tenant isolation** (tenant A cannot
+  read/modify tenant B's data through any endpoint, and specifically: does
+  `@TenantId` actually block a crafted cross-tenant lookup), subscription
+  state transitions, period calculations, and later billing totals.
 
 **API completeness**
 
@@ -305,10 +323,6 @@ feature module does.
 - No currency consistency rule — nothing prevents a tenant from mixing
   currencies across plans a single invoice would later combine.
 - `audit_event` table exists but nothing writes to it.
-- **No README.** For a portfolio repo this matters more than a feature: what the
-  project is, the architecture diagram, how to run it (`docker compose up`,
-  Swagger URL), and the concepts it demonstrates. It's the first and often only
-  thing a reviewer reads.
 
 ---
 
