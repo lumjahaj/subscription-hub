@@ -24,6 +24,10 @@ spring:
 server:
   port: 8080
 
+subscription:
+  renewal:
+    cron: "0 0 * * * *"   # hourly, on the hour
+
 management:
   endpoints:
     web:
