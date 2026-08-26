@@ -17,9 +17,16 @@ public final class PlanMapper {
         PlanEntity entity = new PlanEntity();
         entity.setCode(request.code());
         entity.setName(request.name());
+        entity.setInterval(request.interval());
+        entity.setAmountCents(request.amountCents());
+        if (request.currency() != null) {
+            entity.setCurrency(request.currency());
+        }
+        if (request.trialDays() != null) {
+            entity.setTrialDays(request.trialDays());
+        }
         return entity;
     }
-
     public static PlanResponse toResponse(PlanEntity entity) {
         return new PlanResponse(
                 entity.getId(),
