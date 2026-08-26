@@ -1,0 +1,11 @@
+-- Adds PAUSED to subscription_status, alongside the existing
+-- TRIALING/ACTIVE/PAST_DUE/CANCELED values from V1.
+--
+-- PAUSED represents a deliberate, voluntary suspension (customer or admin
+-- initiated) — distinct from PAST_DUE, which represents a failed payment
+-- and is the dunning-related state introduced in V1.
+--
+-- IF NOT EXISTS makes this safe to re-run; ADD VALUE is safe outside an
+-- explicit transaction on PostgreSQL 12+, which this project already
+-- requires (running on 17).
+ALTER TYPE subscription_status ADD VALUE IF NOT EXISTS 'PAUSED';
