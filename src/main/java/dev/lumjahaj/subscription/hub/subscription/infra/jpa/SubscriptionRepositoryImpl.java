@@ -5,6 +5,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
@@ -29,5 +30,10 @@ public class SubscriptionRepositoryImpl implements SubscriptionRepository {
     @Override
     public Page<SubscriptionEntity> findByTenantIdAndCustomerId(String tenantId, UUID customerId, Pageable pageable) {
         return jpaRepository.findByTenantIdAndCustomerId(tenantId, customerId, pageable);
+    }
+
+    @Override
+    public Optional<SubscriptionEntity> findByTenantIdAndId(String tenantId, UUID id) {
+        return jpaRepository.findByTenantIdAndId(tenantId, id);
     }
 }

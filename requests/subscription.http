@@ -133,3 +133,55 @@ X-Tenant-Id: acme
 ### List Subscriptions — tenant isolation check (demo should see none of these)
 GET {{baseUrl}}/api/subscriptions
 X-Tenant-Id: demo
+
+
+### Setup — Subscription for state-transition tests (trial plan -> TRIALING)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{customerId}}",
+  "planCode": "sub-trial-monthly"
+}
+
+> {%
+    client.global.set("transitionSubId", response.body.id);
+%}
+
+### Pause — TRIALING -> PAUSED (expects 200, status PAUSED)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/pause
+X-Tenant-Id: acme
+
+### Pause — already PAUSED (expects 409 INVALID_SUBSCRIPTION_STATE)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/pause
+X-Tenant-Id: acme
+
+### Resume — PAUSED -> ACTIVE (expects 200, status ACTIVE)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/resume
+X-Tenant-Id: acme
+
+### Resume — not PAUSED (expects 409 INVALID_SUBSCRIPTION_STATE)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/resume
+X-Tenant-Id: acme
+
+### Cancel — ACTIVE -> CANCELED (expects 200, status CANCELED, canceledAt set)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/cancel
+X-Tenant-Id: acme
+
+### Cancel — already CANCELED (expects 409 INVALID_SUBSCRIPTION_STATE)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/cancel
+X-Tenant-Id: acme
+
+### Pause — a CANCELED subscription (expects 409 INVALID_SUBSCRIPTION_STATE)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/pause
+X-Tenant-Id: acme
+
+### Cancel — tenant isolation: demo tries to cancel acme's subscription id
+### (expects 404 SUBSCRIPTION_NOT_FOUND — must not leak or succeed)
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/cancel
+X-Tenant-Id: demo
+
+### Cancel — unknown subscription id (expects 404 SUBSCRIPTION_NOT_FOUND)
+POST {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000/cancel
+X-Tenant-Id: acme

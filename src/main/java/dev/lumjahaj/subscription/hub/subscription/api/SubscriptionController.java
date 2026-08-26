@@ -32,6 +32,24 @@ public class SubscriptionController {
                 .body(SubscriptionMapper.toResponse(created));
     }
 
+    @PostMapping("/{id}/cancel")
+    public ResponseEntity<SubscriptionResponse> cancel(@PathVariable UUID id) {
+        SubscriptionEntity canceled = subscriptionService.cancel(id);
+        return ResponseEntity.ok(SubscriptionMapper.toResponse(canceled));
+    }
+
+    @PostMapping("/{id}/pause")
+    public ResponseEntity<SubscriptionResponse> pause(@PathVariable UUID id) {
+        SubscriptionEntity paused = subscriptionService.pause(id);
+        return ResponseEntity.ok(SubscriptionMapper.toResponse(paused));
+    }
+
+    @PostMapping("/{id}/resume")
+    public ResponseEntity<SubscriptionResponse> resume(@PathVariable UUID id) {
+        SubscriptionEntity resumed = subscriptionService.resume(id);
+        return ResponseEntity.ok(SubscriptionMapper.toResponse(resumed));
+    }
+
     @GetMapping
     public ResponseEntity<Page<SubscriptionResponse>> list(
             @RequestParam(required = false) UUID customerId,

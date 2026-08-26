@@ -69,6 +69,41 @@ public class SubscriptionService {
         return subscriptions.save(entity);
     }
 
+    public SubscriptionEntity cancel(UUID id) {
+        SubscriptionEntity subscription = findOwned(id);
+        if (subscription.getStatus() == SubscriptionStatus.CANCELED) {
+            throw new InvalidSubscriptionStateException("cancel", subscription.getStatus());
+        }
+        subscription.setStatus(SubscriptionStatus.CANCELED);
+        subscription.setCanceledAt(Instant.now());
+        return subscriptions.save(subscription);
+    }
+
+    public SubscriptionEntity pause(UUID id) {
+        SubscriptionEntity subscription = findOwned(id);
+        if (subscription.getStatus() != SubscriptionStatus.ACTIVE
+                && subscription.getStatus() != SubscriptionStatus.TRIALING) {
+            throw new InvalidSubscriptionStateException("pause", subscription.getStatus());
+        }
+        subscription.setStatus(SubscriptionStatus.PAUSED);
+        return subscriptions.save(subscription);
+    }
+
+    public SubscriptionEntity resume(UUID id) {
+        SubscriptionEntity subscription = findOwned(id);
+        if (subscription.getStatus() != SubscriptionStatus.PAUSED) {
+            throw new InvalidSubscriptionStateException("resume", subscription.getStatus());
+        }
+        subscription.setStatus(SubscriptionStatus.ACTIVE);
+        return subscriptions.save(subscription);
+    }
+
+    private SubscriptionEntity findOwned(UUID id) {
+        String tenantId = TenantContext.getTenantId();
+        return subscriptions.findByTenantIdAndId(tenantId, id)
+                .orElseThrow(() -> new ResourceNotFoundException("Subscription", id.toString()));
+    }
+
     public Page<SubscriptionEntity> list(Pageable pageable) {
         String tenantId = TenantContext.getTenantId();
         return subscriptions.findByTenantId(tenantId, pageable);

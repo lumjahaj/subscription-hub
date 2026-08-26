@@ -52,4 +52,9 @@ public class ProblemDetailsAdvice {
     ProblemDetail handleNotFound(ResourceNotFoundException ex) {
         return base(HttpStatus.NOT_FOUND, ex.getCode(), ex.getMessage());
     }
+
+    @ExceptionHandler(BusinessRuleViolationException.class)
+    ProblemDetail handleBusinessRuleViolation(BusinessRuleViolationException ex) {
+        return base(ex.getStatus(), ex.getCode(), ex.getMessage());
+    }
 }
