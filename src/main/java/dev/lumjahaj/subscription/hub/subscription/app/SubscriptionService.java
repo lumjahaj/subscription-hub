@@ -15,8 +15,6 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
 import java.util.UUID;
 
 @Service
@@ -60,7 +58,7 @@ public class SubscriptionService {
             entity.setCurrentPeriodEnd(trialEnd);
             entity.setNextRenewal(trialEnd);
         } else {
-            Instant periodEnd = addInterval(now, plan.getInterval());
+            Instant periodEnd = BillingPeriods.addInterval(now, plan.getInterval());
             entity.setStatus(SubscriptionStatus.ACTIVE);
             entity.setCurrentPeriodEnd(periodEnd);
             entity.setNextRenewal(periodEnd);
@@ -112,22 +110,5 @@ public class SubscriptionService {
     public Page<SubscriptionEntity> listByCustomer(UUID customerId, Pageable pageable) {
         String tenantId = TenantContext.getTenantId();
         return subscriptions.findByTenantIdAndCustomerId(tenantId, customerId, pageable);
-    }
-
-    /**
-     * Instant has no notion of "a month" or "a year" (those are
-     * calendar-based, not fixed-duration) — plus(1, ChronoUnit.MONTHS)
-     * on an Instant throws UnsupportedTemporalTypeException. Converting
-     * to ZonedDateTime (UTC) first gives access to plusMonths/plusYears,
-     * then converting back to Instant for storage.
-     */
-    private Instant addInterval(Instant start, String interval) {
-        ZonedDateTime zdt = start.atZone(ZoneOffset.UTC);
-        ZonedDateTime end = switch (interval) {
-            case "MONTH" -> zdt.plusMonths(1);
-            case "YEAR" -> zdt.plusYears(1);
-            default -> throw new IllegalStateException("Unknown plan interval: " + interval);
-        };
-        return end.toInstant();
     }
 }
