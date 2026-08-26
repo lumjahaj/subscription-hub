@@ -1,0 +1,76 @@
+### Create Customer — happy path
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "externalId": "cus_stripe_12345",
+  "email": "jane@acme.test",
+  "name": "Jane Doe"
+}
+
+### Create Customer — no externalId (optional field)
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "email": "bob@acme.test",
+  "name": "Bob Smith"
+}
+
+### Create Customer — duplicate email, same tenant (expects 409 CUSTOMER_ALREADY_EXISTS)
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "email": "jane@acme.test",
+  "name": "Jane Duplicate"
+}
+
+### Create Customer — same email, different tenant (expects 201 — tenant isolation check)
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: demo
+
+{
+  "email": "jane@acme.test",
+  "name": "Jane Doe (demo tenant)"
+}
+
+### Create Customer — invalid email format (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "email": "not-an-email",
+  "name": "Invalid Email"
+}
+
+### Create Customer — missing name (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "email": "noname@acme.test"
+}
+
+### Create Customer — missing X-Tenant-Id header (expects 400 TENANT_MISSING)
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+
+{
+  "email": "no-tenant@acme.test",
+  "name": "No Tenant"
+}
+
+### List Customers
+GET {{baseUrl}}/api/customers
+X-Tenant-Id: acme
+
+### List Customers — tenant isolation check (demo should not see acme's customers)
+GET {{baseUrl}}/api/customers
+X-Tenant-Id: demo
