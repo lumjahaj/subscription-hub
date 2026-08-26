@@ -1,0 +1,135 @@
+### Setup — Product for subscription tests
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "sub-test-product",
+  "name": "Subscription Test Product"
+}
+
+### Setup — Plan WITH a trial (14 days)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "sub-test-product",
+  "code": "sub-trial-monthly",
+  "name": "Trial Monthly",
+  "interval": "MONTH",
+  "amountCents": 2999,
+  "currency": "USD",
+  "trialDays": 14
+}
+
+### Setup — Plan WITHOUT a trial
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "sub-test-product",
+  "code": "sub-notrial-monthly",
+  "name": "No Trial Monthly",
+  "interval": "MONTH",
+  "amountCents": 1999,
+  "currency": "USD"
+}
+
+### Setup — Customer, capture id for use below
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "email": "sub-test@acme.test",
+  "name": "Subscription Test Customer"
+}
+
+> {%
+    client.global.set("customerId", response.body.id);
+%}
+
+
+### Create Subscription — WITH trial (expects status TRIALING, currentPeriodEnd ~14 days out)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{customerId}}",
+  "planCode": "sub-trial-monthly"
+}
+
+### Create Subscription — WITHOUT trial (expects status ACTIVE, currentPeriodEnd ~1 month out)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{customerId}}",
+  "planCode": "sub-notrial-monthly"
+}
+
+### Create Subscription — unknown customerId (expects 404 CUSTOMER_NOT_FOUND)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "00000000-0000-0000-0000-000000000000",
+  "planCode": "sub-trial-monthly"
+}
+
+### Create Subscription — unknown planCode (expects 404 PLAN_NOT_FOUND)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{customerId}}",
+  "planCode": "does-not-exist"
+}
+
+### Create Subscription — missing customerId (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "planCode": "sub-trial-monthly"
+}
+
+### Create Subscription — missing planCode (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{customerId}}"
+}
+
+### Create Subscription — tenant isolation check: acme's customerId/planCode used
+### under demo tenant (expects 404 CUSTOMER_NOT_FOUND — neither the customer
+### nor the plan exist for the demo tenant, so this must NOT succeed)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: demo
+
+{
+  "customerId": "{{customerId}}",
+  "planCode": "sub-trial-monthly"
+}
+
+### List Subscriptions — all, for acme
+GET {{baseUrl}}/api/subscriptions
+X-Tenant-Id: acme
+
+### List Subscriptions — filtered by customerId
+GET {{baseUrl}}/api/subscriptions?customerId={{customerId}}
+X-Tenant-Id: acme
+
+### List Subscriptions — tenant isolation check (demo should see none of these)
+GET {{baseUrl}}/api/subscriptions
+X-Tenant-Id: demo
