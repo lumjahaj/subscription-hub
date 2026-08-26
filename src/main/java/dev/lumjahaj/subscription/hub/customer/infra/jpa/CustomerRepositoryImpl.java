@@ -6,6 +6,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
 import java.util.Optional;
+import java.util.UUID;
 
 @Repository
 public class CustomerRepositoryImpl implements CustomerRepository {
@@ -29,5 +30,10 @@ public class CustomerRepositoryImpl implements CustomerRepository {
     @Override
     public Page<CustomerEntity> findByTenantId(String tenantId, Pageable pageable) {
         return jpaRepository.findByTenantId(tenantId, pageable);
+    }
+
+    @Override
+    public Optional<CustomerEntity> findByTenantIdAndId(String tenantId, UUID id) {
+        return jpaRepository.findByTenantIdAndId(tenantId, id);
     }
 }

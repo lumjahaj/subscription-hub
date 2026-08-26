@@ -10,4 +10,5 @@ import java.util.UUID;
 public interface CustomerJpaRepository extends JpaRepository<CustomerEntity, UUID> {
     Optional<CustomerEntity> findByTenantIdAndEmail(String tenantId, String email);
     Page<CustomerEntity> findByTenantId(String tenantId, Pageable pageable);
+    Optional<CustomerEntity> findByTenantIdAndId(String tenantId, UUID id);
 }
