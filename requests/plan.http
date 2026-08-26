@@ -1,0 +1,157 @@
+### Setup — create a Product for plans to reference
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "messaging",
+  "name": "Messaging API",
+  "description": "Messaging platform"
+}
+
+### Create Plan — happy path
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "messaging",
+  "code": "pro-monthly",
+  "name": "Pro Monthly",
+  "interval": "MONTH",
+  "amountCents": 4999,
+  "currency": "USD",
+  "trialDays": 14
+}
+
+### Create Plan — omit currency and trialDays (expects entity defaults: EUR, 0)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "messaging",
+  "code": "basic-monthly",
+  "name": "Basic Monthly",
+  "interval": "MONTH",
+  "amountCents": 999
+}
+
+### Create Plan — duplicate code, same tenant (expects 409 PLAN_ALREADY_EXISTS)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "messaging",
+  "code": "pro-monthly",
+  "name": "Duplicate Pro Monthly",
+  "interval": "MONTH",
+  "amountCents": 5999
+}
+
+### Create Plan — unknown productCode (expects 404 PRODUCT_NOT_FOUND)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "does-not-exist",
+  "code": "ghost-plan",
+  "name": "Ghost Plan",
+  "interval": "MONTH",
+  "amountCents": 100
+}
+
+### Create Plan — invalid interval (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "messaging",
+  "code": "weekly-plan",
+  "name": "Weekly Plan",
+  "interval": "WEEK",
+  "amountCents": 100
+}
+
+### List Plans
+GET {{baseUrl}}/api/plans
+X-Tenant-Id: acme
+
+### List Plans — tenant isolation check (demo tenant should see none of acme's plans)
+GET {{baseUrl}}/api/plans
+X-Tenant-Id: demo
+
+
+### ============================================================
+### PlanEntitlement — depends on pro-monthly existing (created above)
+### ============================================================
+
+### Create Entitlement — object value
+POST {{baseUrl}}/api/plans/pro-monthly/entitlements
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "key": "max_users",
+  "value": { "limit": 50 }
+}
+
+### Create Entitlement — boolean value
+POST {{baseUrl}}/api/plans/pro-monthly/entitlements
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "key": "priority_support",
+  "value": true
+}
+
+### Create Entitlement — duplicate key on same plan (expects 409 PLANENTITLEMENT_ALREADY_EXISTS)
+POST {{baseUrl}}/api/plans/pro-monthly/entitlements
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "key": "max_users",
+  "value": { "limit": 999 }
+}
+
+### Create Entitlement — same key on a DIFFERENT plan (expects 201 — key uniqueness is per-plan, not global)
+POST {{baseUrl}}/api/plans/basic-monthly/entitlements
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "key": "max_users",
+  "value": { "limit": 5 }
+}
+
+### Create Entitlement — unknown plan code (expects 404 PLAN_NOT_FOUND)
+POST {{baseUrl}}/api/plans/does-not-exist/entitlements
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "key": "max_users",
+  "value": { "limit": 10 }
+}
+
+### Create Entitlement — missing value (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/plans/pro-monthly/entitlements
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "key": "no_value_key"
+}
+
+### List Entitlements for pro-monthly
+GET {{baseUrl}}/api/plans/pro-monthly/entitlements
+X-Tenant-Id: acme
+
+### List Entitlements — tenant isolation check
+GET {{baseUrl}}/api/plans/pro-monthly/entitlements
+X-Tenant-Id: demo

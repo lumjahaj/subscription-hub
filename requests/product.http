@@ -1,0 +1,96 @@
+### Create Product — happy path
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "messaging",
+  "name": "Messaging API",
+  "description": "Messaging platform"
+}
+
+### Create Product — no description (optional field)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "analytics",
+  "name": "Analytics API"
+}
+
+### Create Product — duplicate code, same tenant (expects 409 PRODUCT_ALREADY_EXISTS)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "messaging",
+  "name": "Messaging API Duplicate",
+  "description": "Should be rejected"
+}
+
+### Create Product — same code, different tenant (expects 201 — tenant isolation check)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: demo
+
+{
+  "code": "messaging",
+  "name": "Messaging API (demo tenant)",
+  "description": "Same code as acme's product, different tenant — must succeed"
+}
+
+### Create Product — missing code (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "name": "No Code Product"
+}
+
+### Create Product — blank name (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "no-name",
+  "name": ""
+}
+
+### Create Product — missing X-Tenant-Id header (expects 400 TENANT_MISSING)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "code": "no-tenant",
+  "name": "No Tenant Product"
+}
+
+### Create Product — unknown tenant (expects 401 TENANT_UNKNOWN)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: does-not-exist
+
+{
+  "code": "ghost",
+  "name": "Ghost Product"
+}
+
+### List Products — default paging
+GET {{baseUrl}}/api/products
+X-Tenant-Id: acme
+
+### List Products — explicit page/size
+GET {{baseUrl}}/api/products?page=0&size=5
+X-Tenant-Id: acme
+
+### List Products — sorted by name
+GET {{baseUrl}}/api/products?sort=name,asc
+X-Tenant-Id: acme
+
+### List Products — tenant isolation check (demo tenant should NOT see acme's products)
+GET {{baseUrl}}/api/products
+X-Tenant-Id: demo
