@@ -7,8 +7,6 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.http.HttpHeaders;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Base for integration tests that need a real Postgres and a real HTTP
@@ -19,14 +17,23 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * The container is a static field on this shared base class so every
  * subclass reuses the same instance and the same cached Spring context
  * instead of paying startup cost per test class.
+ *
+ * Deliberately NOT annotated @Testcontainers/@Container: that extension has a
+ * per-test-class lifecycle, so it stops the container after every subclass
+ * while Spring's context cache keeps handing out the DataSource built from the
+ * first container's JDBC URL. The second integration test class to run then
+ * talks to a dead port. Starting it here in a static initializer instead gives
+ * it JVM-wide lifetime; Ryuk reaps it on exit.
  */
-@Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 public abstract class AbstractIntegrationTest {
 
-    @Container
     @ServiceConnection
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
+
+    static {
+        POSTGRES.start();
+    }
 
     @Autowired
     protected TestRestTemplate restTemplate;
