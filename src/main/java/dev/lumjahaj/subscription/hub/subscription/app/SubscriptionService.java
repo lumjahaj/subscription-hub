@@ -58,7 +58,7 @@ public class SubscriptionService {
             entity.setCurrentPeriodEnd(trialEnd);
             entity.setNextRenewal(trialEnd);
         } else {
-            Instant periodEnd = BillingPeriods.addInterval(now, plan.getInterval());
+            Instant periodEnd = BillingPeriods.addInterval(now, plan.getIntervalUnit(), plan.getIntervalCount());
             entity.setStatus(SubscriptionStatus.ACTIVE);
             entity.setCurrentPeriodEnd(periodEnd);
             entity.setNextRenewal(periodEnd);

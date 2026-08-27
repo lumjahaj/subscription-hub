@@ -1,7 +1,10 @@
 package dev.lumjahaj.subscription.hub.catalog.infra.jpa;
 
+import dev.lumjahaj.subscription.hub.catalog.domain.IntervalUnit;
 import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Table(
@@ -24,8 +27,16 @@ public class PlanEntity extends TenantScoped {
     @Column(nullable = false)
     private String name;
 
-    @Column(name = "interval", nullable = false, length = 16)
-    private String interval; // MONTH|YEAR (string-mapped for simplicity)
+    // NAMED_ENUM tells Hibernate to bind this as the native Postgres
+    // plan_interval_unit type, not varchar — same category of bug as
+    // SubscriptionEntity.status needing the same two annotations.
+    @Enumerated(EnumType.STRING)
+    @JdbcTypeCode(SqlTypes.NAMED_ENUM)
+    @Column(name = "interval_unit", nullable = false, columnDefinition = "plan_interval_unit")
+    private IntervalUnit intervalUnit;
+
+    @Column(name = "interval_count", nullable = false)
+    private int intervalCount = 1;
 
     @Column(name = "amount_cents", nullable = false)
     private long amountCents;
@@ -45,8 +56,10 @@ public class PlanEntity extends TenantScoped {
     public void setCode(String code) {this.code = code;}
     public String getName() {return name;}
     public void setName(String name) {this.name = name;}
-    public String getInterval() {return interval;}
-    public void setInterval(String interval) {this.interval = interval;}
+    public IntervalUnit getIntervalUnit() {return intervalUnit;}
+    public void setIntervalUnit(IntervalUnit intervalUnit) {this.intervalUnit = intervalUnit;}
+    public int getIntervalCount() {return intervalCount;}
+    public void setIntervalCount(int intervalCount) {this.intervalCount = intervalCount;}
     public long getAmountCents() {return amountCents;}
     public void setAmountCents(long amountCents) {this.amountCents = amountCents;}
     public String getCurrency() {return currency;}

@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.catalog.api.dto;
 
+import dev.lumjahaj.subscription.hub.catalog.domain.IntervalUnit;
+
 import java.time.Instant;
 import java.util.UUID;
 
@@ -8,7 +10,8 @@ public record PlanResponse(
         String productCode,
         String code,
         String name,
-        String interval,
+        IntervalUnit intervalUnit,
+        int intervalCount,
         long amountCents,
         String currency,
         int trialDays,

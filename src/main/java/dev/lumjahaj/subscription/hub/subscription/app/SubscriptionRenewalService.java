@@ -75,7 +75,7 @@ public class SubscriptionRenewalService {
 
         Instant oldPeriodEnd = subscription.getCurrentPeriodEnd();
         PlanEntity plan = subscription.getPlan();
-        Instant newPeriodEnd = BillingPeriods.addInterval(oldPeriodEnd, plan.getInterval());
+        Instant newPeriodEnd = BillingPeriods.addInterval(oldPeriodEnd, plan.getIntervalUnit(), plan.getIntervalCount());
 
         subscription.setStatus(SubscriptionStatus.ACTIVE);
         subscription.setCurrentPeriodStart(oldPeriodEnd);
