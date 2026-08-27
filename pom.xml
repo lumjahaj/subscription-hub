@@ -112,6 +112,19 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <!--
+                    Surefire's default runOrder is `filesystem`, which differs
+                    between NTFS and ext4 - the same defect then fails in a
+                    different test class locally than it does on CI. Pin it so
+                    a failure reproduces everywhere.
+                -->
+                <configuration>
+                    <runOrder>alphabetical</runOrder>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 
