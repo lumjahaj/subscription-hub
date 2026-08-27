@@ -34,10 +34,11 @@ Read these before suggesting anything.
 ## 2. Stack
 
 Java 21 · Spring Boot 3.5.6 · Maven · Spring Web / Data JPA / Validation /
-Security · Hibernate 6 · PostgreSQL 17 · Flyway · Docker Compose · springdoc-openapi 2.8.x
+Security · Hibernate 6 · PostgreSQL 17 · Flyway · Testcontainers · Docker Compose ·
+springdoc-openapi 2.8.x
 
-Planned: JWT, Redis, MinIO (invoice PDFs), MailHog/Mailpit, Testcontainers,
-WireMock, Micrometer, Prometheus, Grafana.
+Planned: JWT, Redis, MinIO (invoice PDFs), MailHog/Mailpit, WireMock, Micrometer,
+Prometheus, Grafana.
 
 Everything must stay **free and locally runnable**.
 
@@ -194,7 +195,7 @@ happy path, validation failures, conflict/not-found, and **tenant isolation**
 tenant (id varchar(64) PK — slug)
  ├── customer            (unique tenant_id + email)
  ├── product             (unique tenant_id + code)
- │    └── plan           (unique tenant_id + code; interval, amount_cents, currency, trial_days)
+ │    └── plan           (unique tenant_id + code; interval_unit, interval_count, amount_cents, currency, trial_days)
  │         └── plan_entitlement   (unique tenant_id + plan_id + key; value_json jsonb)
  ├── subscription        (customer_id, plan_id, status, period/renewal/cancel timestamps)
  │    ├── subscription_entitlement_override
@@ -204,8 +205,9 @@ tenant (id varchar(64) PK — slug)
 ```
 
 Postgres enums: `subscription_status` (`TRIALING`, `ACTIVE`, `PAST_DUE`,
-`CANCELED`, plus `PAUSED` added in V2), `invoice_status` (`DRAFT`, `OPEN`,
-`PAID`, `VOID`, `UNCOLLECTIBLE`).
+`CANCELED`, plus `PAUSED` added in V2), `plan_interval_unit` (`MONTH`, `YEAR`,
+added in V3, replacing the old `plan.interval` string column), `invoice_status`
+(`DRAFT`, `OPEN`, `PAID`, `VOID`, `UNCOLLECTIBLE`).
 
 Seeded tenants for local dev: `acme`, `demo`.
 
@@ -217,7 +219,9 @@ Seeded tenants for local dev: `acme`, `demo`.
 - Docker Compose + PostgreSQL, Spring Boot baseline
 - Tenant resolution, request context, MDC
 - Problem+JSON error handling (`common/api`), shared MDC keys (`common/logging/MdcKeys`)
-- Flyway V1 baseline schema; V2 adds `PAUSED`
+- Flyway V1 baseline schema; V2 adds `PAUSED`; V3 splits `plan.interval` into
+  `interval_unit` + `interval_count` so a plan can bill every N units
+  (quarterly, semi-annual, biennial), not just a fixed period of 1
 - OpenAPI/Swagger — `/swagger-ui/index.html`, `/v3/api-docs`, reusable Problem
   schema attached to error responses
 - **Structural tenant isolation** — Hibernate `@TenantId` on
@@ -233,13 +237,35 @@ Seeded tenants for local dev: `acme`, `demo`.
 - **Customer** — same, `POST`/`GET /api/customers`. Tested via `.http`.
 - **Subscription** — entity, trio, DTOs, mapper, service, controller. Creation
   logic: if `plan.trialDays > 0` → `TRIALING`, period ends `now + trialDays`;
-  else `ACTIVE`, period ends `now + 1 interval`. `nextRenewal = currentPeriodEnd`.
-  `cancelAt`/`canceledAt` stay null. Verified end-to-end via `subscription.http`
-  (trial/no-trial creation, not-found, tenant isolation).
-- Mapper unit tests committed for Product, Plan, PlanEntitlement, Customer,
-  Subscription, with shared validator setup extracted.
-- CI — GitHub Actions workflow running `mvn verify` against a real Postgres
-  service container on every push/PR to `main`.
+  else `ACTIVE`, period ends `now + 1 billing period` (`plan.intervalUnit` ×
+  `plan.intervalCount`, via `BillingPeriods.addInterval`). `nextRenewal =
+  currentPeriodEnd`. Cancel/pause/resume with real transition guards
+  (`InvalidSubscriptionStateException` → 409 `INVALID_SUBSCRIPTION_STATE`;
+  can't cancel a canceled subscription, can't resume one that isn't paused).
+  Verified end-to-end via `subscription.http` and integration tests (below).
+- **Renewal processing** — `SubscriptionRenewalService`, cron-driven
+  (`subscription.renewal.cron`), rolls `TRIALING`/`ACTIVE` subscriptions
+  forward one billing period once `nextRenewal` is due. Anchored to the old
+  `currentPeriodEnd`, not `now`, so job lag never drifts the schedule going
+  forward; self-healing (a subscription months overdue still only advances
+  once per run, staying due for the next). Runs per-tenant under
+  `TenantContext.runAs`, since a scheduled job has no request to populate the
+  ThreadLocal from.
+- Mapper/unit tests committed for Product, Plan, PlanEntitlement, Customer,
+  Subscription, `BillingPeriods`, `SubscriptionRenewalService`, with shared
+  validator setup extracted.
+- **Integration tests** — Testcontainers-backed (`testsupport/AbstractIntegrationTest`:
+  real Postgres via `@ServiceConnection`, `TestRestTemplate` on a random port
+  so requests pass through the full servlet filter chain, not just the
+  controller layer). `TenantIsolationIntegrationTest` proves `@TenantId`
+  actually blocks a crafted cross-tenant lookup against a real database (a
+  cross-tenant cancel 404s instead of leaking or mutating the row; the same
+  code under two tenants doesn't collide). `SubscriptionLifecycleIntegrationTest`
+  covers creation, state-transition guards, and renewal end-to-end against
+  the real DB — the load/save path the pure-function unit tests skip.
+- CI — GitHub Actions workflow running `mvn verify` on every push/PR to
+  `main`; tests self-provision Postgres via Testcontainers, no fixed service
+  container needed.
 - README covering architecture, multi-tenancy model, and local setup.
 
 **Endpoints:**
@@ -256,16 +282,10 @@ POST GET /api/subscriptions[?customerId=]
 
 ## 8. Roadmap
 
-Immediate:
-1. Subscription state transitions — cancel, pause/resume, with a real transition
-   guard (can't cancel a canceled subscription, can't resume one that isn't
-   paused). This is where distinct business-rule exceptions belong.
-2. Renewal processing — scheduled job advancing `TRIALING → ACTIVE` and rolling
-   billing periods. ⚠️ `TenantContext` is a ThreadLocal populated by a servlet
-   filter; background jobs have no request, so tenant scoping must be handled
-   explicitly there.
+Subscription state transitions (cancel/pause/resume) and renewal processing
+are done — see §7.
 
-Then: Usage metering → Billing/invoice calculation → Invoice PDFs (MinIO) →
+Next: Usage metering → Billing/invoice calculation → Invoice PDFs (MinIO) →
 Mock payments → Dunning (`PAST_DUE`) → Notifications (MailHog) → Audit events →
 JWT + RBAC (`ADMIN`, `BILLING`, `SUPPORT`, `USER`) → Observability
 (Actuator, Micrometer, Prometheus, Grafana).
@@ -279,37 +299,37 @@ feature module does.
 
 **Architectural**
 
-- **Tenant isolation has a structural backstop now, but isn't fully closed.**
-  Hibernate `@TenantId` (not `@Filter` — that's opt-in per `Session` and easy
-  to forget to enable, so it's not worth using once `@TenantId` is in place)
-  adds an automatic `tenant_id =` predicate to every Hibernate-mediated query,
-  resolved from the same `TenantContext` via `TenantIdentifierResolver`. It
-  does **not** protect native/`nativeQuery = true` queries (none exist yet),
-  background jobs that never populate `TenantContext`, or anything outside
+- **Tenant isolation has a structural backstop, now verified but not fully
+  closed.** Hibernate `@TenantId` (not `@Filter` — that's opt-in per `Session`
+  and easy to forget to enable, so it's not worth using once `@TenantId` is in
+  place) adds an automatic `tenant_id =` predicate to every Hibernate-mediated
+  query, resolved from the same `TenantContext` via `TenantIdentifierResolver`.
+  `TenantIsolationIntegrationTest` now proves this holds against a real
+  Postgres — a crafted cross-tenant lookup 404s rather than leaking or
+  mutating another tenant's row, and the same natural key succeeds under two
+  tenants without colliding. It still does **not** protect
+  native/`nativeQuery = true` queries (none exist yet) or anything outside
   Hibernate entirely (a raw JDBC script, a future reporting tool). Postgres
   row-level security remains the stronger, DB-level option for those cases —
-  deliberately not done yet, because verifying it properly needs a real
-  Testcontainers integration test (see Testing gap below) and correct
-  `SET LOCAL`/HikariCP wiring; the plan is to pair the two rather than ship
-  RLS unverified.
+  deliberately not done yet; the Testcontainers harness that was the
+  prerequisite for verifying it properly now exists, so RLS is next up if the
+  `SET LOCAL`/HikariCP wiring is worth it.
 - **Check-then-save uniqueness race.** `findByTenantIdAndCode(...).ifPresent(throw)`
   followed by `save(...)` isn't atomic. The DB constraint catches it, but the
   resulting `DataIntegrityViolationException` currently falls through to a
   generic 500. Catch it and map to the same 409.
-- **`TenantContext` and async.** ThreadLocal doesn't propagate to `@Async`
-  threads or scheduled jobs. Must be addressed before renewal processing.
 - **`Page<T>` serialization.** Spring warns about serializing `PageImpl`
   directly; the JSON shape isn't a stable API contract. A small `PagedResponse<T>`
   wrapper would be more honest as a public API.
 
-**Testing — still the biggest portfolio gap**
+**Testing**
 
-- Mapper unit tests and CI (`mvn verify` on every push) are in place. What's
-  missing is integration tests: Testcontainers + PostgreSQL, asserting the
-  rules that actually matter — **tenant isolation** (tenant A cannot
-  read/modify tenant B's data through any endpoint, and specifically: does
-  `@TenantId` actually block a crafted cross-tenant lookup), subscription
-  state transitions, period calculations, and later billing totals.
+- Mapper/unit tests, CI, and Testcontainers-backed integration tests are all
+  in place now — tenant isolation, subscription state transitions, and
+  renewal period math are verified against a real Postgres end-to-end, not
+  just unit-tested in isolation (see §7). Remaining gap: no test yet for the
+  check-then-save uniqueness race above, and billing totals aren't testable
+  until Billing is built.
 
 **API completeness**
 
@@ -320,9 +340,6 @@ feature module does.
 
 **Smaller**
 
-- `plan.interval` is a `String` with a `@Pattern` guard; an enum (`MONTH`,
-  `YEAR`) mapped the same way as `SubscriptionStatus` would be type-safe and
-  remove the `switch` default that throws `IllegalStateException`.
 - No currency consistency rule — nothing prevents a tenant from mixing
   currencies across plans a single invoice would later combine.
 - `audit_event` table exists but nothing writes to it.
