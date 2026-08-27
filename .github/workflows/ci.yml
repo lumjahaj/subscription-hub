@@ -23,6 +23,4 @@ jobs:
           cache: maven
 
       - name: Run mvn verify
-        run: |
-          chmod +x mvnw
-          ./mvnw -B verify
+        run: ./mvnw -B verify
