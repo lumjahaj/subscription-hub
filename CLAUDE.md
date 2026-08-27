@@ -172,6 +172,29 @@ point.
 Without these, Hibernate binds as `varchar` and Postgres rejects the statement.
 The same applies to `invoice_status` when Billing is built.
 
+**Integration tests + Testcontainers** — this has bitten once, silently, for
+three commits:
+- **Never** put `@Testcontainers` / `@Container` on `AbstractIntegrationTest`.
+  That extension's lifecycle is *per test class* — it stops the container after
+  every subclass — while Spring's context cache builds the context once and
+  keeps handing out the `DataSource` holding the first container's JDBC URL.
+  The second DB-touching test class to run then talks to a dead port.
+- The rule underneath: **the container must outlive every Spring context that
+  points at it.** Use the singleton pattern — static field, `@ServiceConnection`,
+  `static { POSTGRES.start(); }`, no JUnit extension. Ryuk reaps it on JVM exit.
+- **Invariant: exactly one container per build.**
+  `./mvnw -B verify | grep -c "Container is started (JDBC URL"` must print `1`.
+  It printed `3` for three commits and nobody looked.
+- Verify with a **full `./mvnw verify`**, never a single class. A per-class run
+  structurally cannot catch a cross-class lifecycle bug — the JVM exits first.
+  Surefire's default `runOrder` is `filesystem`, which differs between Windows
+  and Linux, so such a bug fails in a *different class* locally than on CI, and
+  a green single-class run proves nothing.
+- Setup helpers assert the response status before calling `.getBody()`.
+  Otherwise a problem+json body deserializes into the response record and
+  surfaces as a confusing Jackson error (ProblemDetail's numeric `status` vs.
+  an enum field) hundreds of log lines from the real cause.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
 
@@ -255,7 +278,8 @@ Seeded tenants for local dev: `acme`, `demo`.
   Subscription, `BillingPeriods`, `SubscriptionRenewalService`, with shared
   validator setup extracted.
 - **Integration tests** — Testcontainers-backed (`testsupport/AbstractIntegrationTest`:
-  real Postgres via `@ServiceConnection`, `TestRestTemplate` on a random port
+  real Postgres via `@ServiceConnection` started once as a JVM-wide singleton —
+  see the Testcontainers rules in §5 — `TestRestTemplate` on a random port
   so requests pass through the full servlet filter chain, not just the
   controller layer). `TenantIsolationIntegrationTest` proves `@TenantId`
   actually blocks a crafted cross-tenant lookup against a real database (a
