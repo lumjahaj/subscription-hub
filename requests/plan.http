@@ -18,13 +18,15 @@ X-Tenant-Id: acme
   "productCode": "messaging",
   "code": "pro-monthly",
   "name": "Pro Monthly",
-  "interval": "MONTH",
+  "intervalUnit": "MONTH",
+  "intervalCount": 1,
   "amountCents": 4999,
   "currency": "USD",
   "trialDays": 14
 }
 
-### Create Plan — omit currency and trialDays (expects entity defaults: EUR, 0)
+### Create Plan — omit currency, trialDays, and intervalCount
+### (expects entity defaults: EUR, 0, 1)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
 X-Tenant-Id: acme
@@ -33,8 +35,38 @@ X-Tenant-Id: acme
   "productCode": "messaging",
   "code": "basic-monthly",
   "name": "Basic Monthly",
-  "interval": "MONTH",
+  "intervalUnit": "MONTH",
   "amountCents": 999
+}
+
+### Create Plan — quarterly billing (intervalUnit MONTH, intervalCount 3)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "messaging",
+  "code": "pro-quarterly",
+  "name": "Pro Quarterly",
+  "intervalUnit": "MONTH",
+  "intervalCount": 3,
+  "amountCents": 13999,
+  "currency": "USD"
+}
+
+### Create Plan — biennial billing (intervalUnit YEAR, intervalCount 2)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "messaging",
+  "code": "pro-biennial",
+  "name": "Pro Biennial",
+  "intervalUnit": "YEAR",
+  "intervalCount": 2,
+  "amountCents": 89999,
+  "currency": "USD"
 }
 
 ### Create Plan — duplicate code, same tenant (expects 409 PLAN_ALREADY_EXISTS)
@@ -46,7 +78,7 @@ X-Tenant-Id: acme
   "productCode": "messaging",
   "code": "pro-monthly",
   "name": "Duplicate Pro Monthly",
-  "interval": "MONTH",
+  "intervalUnit": "MONTH",
   "amountCents": 5999
 }
 
@@ -59,11 +91,11 @@ X-Tenant-Id: acme
   "productCode": "does-not-exist",
   "code": "ghost-plan",
   "name": "Ghost Plan",
-  "interval": "MONTH",
+  "intervalUnit": "MONTH",
   "amountCents": 100
 }
 
-### Create Plan — invalid interval (expects 400 VALIDATION_ERROR)
+### Create Plan — invalid intervalUnit (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
 X-Tenant-Id: acme
@@ -72,7 +104,21 @@ X-Tenant-Id: acme
   "productCode": "messaging",
   "code": "weekly-plan",
   "name": "Weekly Plan",
-  "interval": "WEEK",
+  "intervalUnit": "WEEK",
+  "amountCents": 100
+}
+
+### Create Plan — zero intervalCount (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "messaging",
+  "code": "zero-interval-plan",
+  "name": "Zero Interval Plan",
+  "intervalUnit": "MONTH",
+  "intervalCount": 0,
   "amountCents": 100
 }
 

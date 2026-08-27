@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.subscription.app;
 
+import dev.lumjahaj.subscription.hub.catalog.domain.IntervalUnit;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
@@ -15,7 +16,7 @@ class SubscriptionRenewalServiceTest {
 
     private static SubscriptionEntity subscription(SubscriptionStatus status, Instant periodEnd, Instant nextRenewal) {
         PlanEntity plan = new PlanEntity();
-        plan.setInterval("MONTH");
+        plan.setIntervalUnit(IntervalUnit.MONTH);
 
         SubscriptionEntity entity = new SubscriptionEntity();
         entity.setPlan(plan);
@@ -76,6 +77,17 @@ class SubscriptionRenewalServiceTest {
         SubscriptionRenewalService.applyRenewal(sub, NOW);
 
         assertThat(sub.getCurrentPeriodEnd()).isEqualTo(Instant.parse("2025-09-15T00:00:00Z"));
+    }
+
+    @Test
+    void applyRenewal_rollsByThePlansIntervalCountForQuarterlyBilling() {
+        Instant oldEnd = Instant.parse("2026-02-14T00:00:00Z");
+        SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, oldEnd, oldEnd);
+        sub.getPlan().setIntervalCount(3);
+
+        SubscriptionRenewalService.applyRenewal(sub, NOW);
+
+        assertThat(sub.getCurrentPeriodEnd()).isEqualTo(Instant.parse("2026-05-14T00:00:00Z"));
     }
 
     @Test

@@ -17,7 +17,7 @@ X-Tenant-Id: acme
   "productCode": "sub-test-product",
   "code": "sub-trial-monthly",
   "name": "Trial Monthly",
-  "interval": "MONTH",
+  "intervalUnit": "MONTH",
   "amountCents": 2999,
   "currency": "USD",
   "trialDays": 14
@@ -32,7 +32,7 @@ X-Tenant-Id: acme
   "productCode": "sub-test-product",
   "code": "sub-notrial-monthly",
   "name": "No Trial Monthly",
-  "interval": "MONTH",
+  "intervalUnit": "MONTH",
   "amountCents": 1999,
   "currency": "USD"
 }
