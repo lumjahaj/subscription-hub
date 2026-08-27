@@ -178,6 +178,9 @@ applied migration; add a new versioned one.
 Structural refactor, new feature, bug fix, and test tooling are separate commits.
 `fix` means something previously committed and working broke — incomplete work
 finished later is `feat`.
+- Never add a "Co-authored-by" trailer to commit messages.
+- Never run `git commit` or `git push` without showing the exact commit
+  message and diff first, and waiting for explicit approval.
 
 **`.http` files** — every endpoint gets example requests in `requests/`, covering
 happy path, validation failures, conflict/not-found, and **tenant isolation**
