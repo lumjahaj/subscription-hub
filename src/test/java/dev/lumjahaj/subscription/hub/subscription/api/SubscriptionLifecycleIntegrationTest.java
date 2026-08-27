@@ -161,8 +161,10 @@ class SubscriptionLifecycleIntegrationTest extends AbstractIntegrationTest {
         String suffix = UUID.randomUUID().toString();
 
         var productRequest = new ProductCreateRequest("prod-" + suffix, "Lifecycle Test Product", null);
-        restTemplate.exchange("/api/products", HttpMethod.POST,
+        ResponseEntity<ProductResponse> productResponse = restTemplate.exchange(
+                "/api/products", HttpMethod.POST,
                 new HttpEntity<>(productRequest, tenantHeaders(TENANT)), ProductResponse.class);
+        assertThat(productResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
         var planRequest = new PlanCreateRequest(
                 productRequest.code(), "plan-" + suffix, "Lifecycle Test Plan",
@@ -170,6 +172,7 @@ class SubscriptionLifecycleIntegrationTest extends AbstractIntegrationTest {
         ResponseEntity<PlanResponse> planResponse = restTemplate.exchange(
                 "/api/plans", HttpMethod.POST,
                 new HttpEntity<>(planRequest, tenantHeaders(TENANT)), PlanResponse.class);
+        assertThat(planResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
         return planResponse.getBody().code();
     }
@@ -180,6 +183,7 @@ class SubscriptionLifecycleIntegrationTest extends AbstractIntegrationTest {
         ResponseEntity<CustomerResponse> customerResponse = restTemplate.exchange(
                 "/api/customers", HttpMethod.POST,
                 new HttpEntity<>(customerRequest, tenantHeaders(TENANT)), CustomerResponse.class);
+        assertThat(customerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         return customerResponse.getBody().id();
     }
 }

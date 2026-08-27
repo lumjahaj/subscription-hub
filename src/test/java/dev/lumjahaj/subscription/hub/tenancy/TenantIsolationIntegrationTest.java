@@ -111,8 +111,10 @@ class TenantIsolationIntegrationTest extends AbstractIntegrationTest {
         String suffix = UUID.randomUUID().toString();
 
         var productRequest = new ProductCreateRequest("prod-" + suffix, "Isolation Test Product", null);
-        restTemplate.exchange("/api/products", HttpMethod.POST,
+        ResponseEntity<ProductResponse> productResponse = restTemplate.exchange(
+                "/api/products", HttpMethod.POST,
                 new HttpEntity<>(productRequest, tenantHeaders(tenantId)), ProductResponse.class);
+        assertThat(productResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
         var planRequest = new PlanCreateRequest(
                 productRequest.code(), "plan-" + suffix, "Isolation Test Plan",
@@ -120,11 +122,13 @@ class TenantIsolationIntegrationTest extends AbstractIntegrationTest {
         ResponseEntity<PlanResponse> planResponse = restTemplate.exchange(
                 "/api/plans", HttpMethod.POST,
                 new HttpEntity<>(planRequest, tenantHeaders(tenantId)), PlanResponse.class);
+        assertThat(planResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
         var subscriptionRequest = new SubscriptionCreateRequest(customerId, planResponse.getBody().code());
         ResponseEntity<SubscriptionResponse> subscriptionResponse = restTemplate.exchange(
                 "/api/subscriptions", HttpMethod.POST,
                 new HttpEntity<>(subscriptionRequest, tenantHeaders(tenantId)), SubscriptionResponse.class);
+        assertThat(subscriptionResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
         return subscriptionResponse.getBody().id();
     }
@@ -135,6 +139,7 @@ class TenantIsolationIntegrationTest extends AbstractIntegrationTest {
         ResponseEntity<CustomerResponse> customerResponse = restTemplate.exchange(
                 "/api/customers", HttpMethod.POST,
                 new HttpEntity<>(customerRequest, tenantHeaders(tenantId)), CustomerResponse.class);
+        assertThat(customerResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         return customerResponse.getBody().id();
     }
 }
