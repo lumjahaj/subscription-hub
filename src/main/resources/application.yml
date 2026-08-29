@@ -29,6 +29,11 @@ billing:
     cron: "0 0 * * * *"   # hourly, on the hour - invoices then renews each due subscription
   invoice:
     due-days: 14
+  pdf:
+    bucket: invoices
+    endpoint: http://localhost:9000
+    access-key: ${MINIO_ROOT_USER}
+    secret-key: ${MINIO_ROOT_PASSWORD}
 
 management:
   endpoints:

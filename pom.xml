@@ -28,7 +28,29 @@
     </scm>
     <properties>
         <java.version>21</java.version>
+        <awssdk.version>2.31.78</awssdk.version>
+        <openhtmltopdf.version>1.1.83</openhtmltopdf.version>
     </properties>
+
+    <!--
+        The Spring Boot starter parent manages every other version in this
+        file. The AWS SDK isn't in Boot's BOM, so import its own here rather
+        than pinning software.amazon.awssdk:s3 directly - the SDK is a large
+        family of co-versioned artifacts, and the BOM keeps them aligned if
+        another one is ever added.
+    -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${awssdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -61,6 +83,50 @@
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+
+        <!--
+            MinIO is S3-compatible, so this is the AWS SDK rather than the
+            MinIO-specific client: the same adapter works against real S3,
+            R2 or Backblaze by changing an endpoint, which keeps the storage
+            vendor a config value instead of a code dependency.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <exclusions>
+                <!--
+                    The SDK ships both HTTP clients by default. Only the
+                    synchronous S3Client is used here (see StorageConfig),
+                    which is served by apache-client; netty-nio-client
+                    exists solely for S3AsyncClient and would otherwise
+                    drag all of Netty into the fat jar unused.
+                -->
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!--
+            Invoice PDFs are rendered by running a Thymeleaf-templated HTML
+            document through openhtmltopdf, so the layout lives in an
+            editable template instead of hand-computed PDF coordinates.
+            Deliberately org.thymeleaf:thymeleaf (the library, version
+            managed by Boot's BOM) and NOT spring-boot-starter-thymeleaf:
+            the starter would wire Thymeleaf in as an MVC view resolver,
+            and this application is a pure JSON API with no server-rendered
+            views. Nothing outside InvoicePdfRenderer touches it.
+        -->
+        <dependency>
+            <groupId>io.github.openhtmltopdf</groupId>
+            <artifactId>openhtmltopdf-pdfbox</artifactId>
+            <version>${openhtmltopdf.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.thymeleaf</groupId>
+            <artifactId>thymeleaf</artifactId>
         </dependency>
 
         <dependency>
@@ -97,6 +163,11 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>minio</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
