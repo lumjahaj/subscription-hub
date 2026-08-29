@@ -27,8 +27,9 @@ import java.util.UUID;
  * subscription, the closed period's start is no longer recoverable from
  * the row (see InvoiceService), so running the two on separate hourly
  * crons would race, and the losing side is unbilled revenue. This job
- * invoices each due subscription, then renews it, in that order, per
- * subscription — same "thin trigger only" shape RenewalJob had.
+ * invoices each due subscription, renders its PDF, then renews it, in
+ * that order, per subscription — same "thin trigger only" shape
+ * RenewalJob had.
  *
  * Reuses the existing "due for renewal" query unchanged rather than
  * adding a new finder: nextRenewal == currentPeriodEnd at every write
@@ -48,17 +49,20 @@ public class BillingCycleJob {
     private final TenantRepository tenants;
     private final SubscriptionRepository subscriptions;
     private final InvoiceService invoiceService;
+    private final InvoicePdfService invoicePdfService;
     private final SubscriptionRenewalService renewalService;
 
     public BillingCycleJob(
             TenantRepository tenants,
             SubscriptionRepository subscriptions,
             InvoiceService invoiceService,
+            InvoicePdfService invoicePdfService,
             SubscriptionRenewalService renewalService
     ) {
         this.tenants = tenants;
         this.subscriptions = subscriptions;
         this.invoiceService = invoiceService;
+        this.invoicePdfService = invoicePdfService;
         this.renewalService = renewalService;
     }
 
@@ -83,33 +87,48 @@ public class BillingCycleJob {
         }
     }
 
-    private void processOneSafely(UUID subscriptionId, Instant now) {
-        if (tryInvoice(subscriptionId)) {
-            renewOneSafely(subscriptionId, now);
-        }
-    }
-
     /**
-     * Each call is its own transaction (see InvoiceService), so one bad
-     * subscription rolls back only itself.
+     * Invoice, then render its PDF, then renew — in that order, each in
+     * its own transaction (see InvoiceService and InvoicePdfService), so
+     * one bad subscription rolls back only itself.
      *
-     * ResourceAlreadyExistsException means this period was already
-     * invoiced — either a previous run got this far before a later
-     * failure, or a manual POST beat the job to it — either way it's
-     * done, not broken, so renewal proceeds. Any other failure means the
-     * period is genuinely unbilled: renewing past it would be exactly
-     * the revenue loss this ordering exists to prevent, so this
-     * subscription is left due and retried next run rather than renewed.
+     * The three steps fail differently on purpose:
+     *
+     * - Invoicing already done (ResourceAlreadyExistsException) means a
+     *   previous run got this far before a later failure, or a manual
+     *   POST beat the job to it. Done, not broken, so the cycle
+     *   continues; there is simply no new invoice to render.
+     * - Invoicing failed for any other reason means the period is
+     *   genuinely unbilled. Renewing past it would be exactly the revenue
+     *   loss this ordering exists to prevent, so the subscription is left
+     *   due and retried next run rather than renewed.
+     * - The PDF failing blocks nothing. Unlike a missed invoice, a
+     *   missing PDF costs nothing that can't be recovered later by
+     *   POST /api/invoices/{id}/pdf, so an object-store outage must not
+     *   be allowed to stall billing.
      */
-    private boolean tryInvoice(UUID subscriptionId) {
+    private void processOneSafely(UUID subscriptionId, Instant now) {
+        UUID invoiceId;
         try {
-            invoiceService.generateForCurrentPeriod(subscriptionId);
-            return true;
-        } catch (ResourceAlreadyExistsException ex) {
-            return true;
+            invoiceId = invoiceService.generateForCurrentPeriod(subscriptionId).getId();
+        } catch (ResourceAlreadyExistsException alreadyInvoiced) {
+            invoiceId = null;
         } catch (Exception ex) {
             log.error("Invoicing failed for subscription {}", subscriptionId, ex);
-            return false;
+            return;
+        }
+
+        if (invoiceId != null) {
+            generatePdfSafely(invoiceId);
+        }
+        renewOneSafely(subscriptionId, now);
+    }
+
+    private void generatePdfSafely(UUID invoiceId) {
+        try {
+            invoicePdfService.generatePdf(invoiceId);
+        } catch (Exception ex) {
+            log.error("PDF generation failed for invoice {}", invoiceId, ex);
         }
     }
 

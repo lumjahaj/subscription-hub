@@ -77,6 +77,18 @@ class BillingCycleIntegrationTest extends AbstractIntegrationTest {
         assertThat(listInvoices(subscriptionId)).hasSize(1);
     }
 
+    @Test
+    void billingCycle_forAClosedPeriod_alsoGeneratesThePdf() {
+        UUID subscriptionId = createActiveSubscription();
+        forcePeriodDue(subscriptionId);
+
+        billingCycleJob.run();
+
+        List<Map<String, Object>> invoices = listInvoices(subscriptionId);
+        assertThat(invoices).hasSize(1);
+        assertThat(invoices.get(0).get("pdfAvailable")).isEqualTo(true);
+    }
+
     /**
      * BillingCycleJob selects subscriptions the same way RenewalJob did -
      * by nextRenewal - so both nextRenewal and currentPeriodEnd have to
