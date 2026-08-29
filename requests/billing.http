@@ -1,0 +1,136 @@
+### Setup — Product for billing tests
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "billing-test-product",
+  "name": "Billing Test Product"
+}
+
+### Setup — Plan (no trial, so the subscription starts ACTIVE)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "billing-test-product",
+  "code": "billing-test-plan",
+  "name": "Billing Test Plan",
+  "intervalUnit": "MONTH",
+  "amountCents": 2999,
+  "currency": "USD"
+}
+
+### Setup — priced entitlement: usage prices live in plan_entitlement's
+### jsonb. This meter includes 100 free units, then bills 5 cents each.
+POST {{baseUrl}}/api/plans/billing-test-plan/entitlements
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "key": "api.calls",
+  "value": {
+    "includedQuantity": 100,
+    "unitAmountCents": 5
+  }
+}
+
+### Setup — Customer, capture id for use below
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "email": "billing-test@acme.test",
+  "name": "Billing Test Customer"
+}
+
+> {%
+    client.global.set("billingCustomerId", response.body.id);
+%}
+
+### Setup — Subscription, capture id for use below
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{billingCustomerId}}",
+  "planCode": "billing-test-plan"
+}
+
+> {%
+    client.global.set("billingSubId", response.body.id);
+%}
+
+### Setup — record usage above the included quantity (100 included,
+### 150 recorded -> 50 billable at 5 cents = 250 cents)
+POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "api.calls",
+  "amount": 150
+}
+
+
+### Generate invoice — before the period closes (expects 409 INVOICE_PERIOD_NOT_CLOSED)
+POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
+X-Tenant-Id: acme
+
+
+### --- There is no HTTP endpoint to close a billing period early: it
+### closes naturally when current_period_end passes, or BillingCycleJob
+### rolls it forward on its hourly cron. To exercise the requests below
+### without waiting a month, force the period closed in psql first:
+###
+###   UPDATE subscription SET current_period_end = now() - interval '1 day'
+###   WHERE id = '<{{billingSubId}} resolved to its actual value>';
+###
+### Only then will the requests below return 201 instead of 409.
+
+
+### Generate invoice — after the period closes (expects 201, BASE + USAGE lines,
+### totalCents = 2999 + 250 = 3249). Capture id for use below.
+POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
+X-Tenant-Id: acme
+
+> {%
+    client.global.set("billingInvoiceId", response.body.id);
+%}
+
+### Generate invoice — again for the same period (expects 409 INVOICE_ALREADY_EXISTS)
+POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
+X-Tenant-Id: acme
+
+### Generate invoice — unknown subscription id (expects 404 SUBSCRIPTION_NOT_FOUND)
+POST {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000/invoices
+X-Tenant-Id: acme
+
+### Generate invoice — tenant isolation: acme's subscription id under demo
+### (expects 404 SUBSCRIPTION_NOT_FOUND — must not leak or succeed)
+POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
+X-Tenant-Id: demo
+
+
+### Get invoice by id — expects 200 with BASE and USAGE lines
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
+X-Tenant-Id: acme
+
+### Get invoice by id — tenant isolation check (expects 404 INVOICE_NOT_FOUND)
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
+X-Tenant-Id: demo
+
+### List invoices for the subscription — expects one invoice
+GET {{baseUrl}}/api/invoices?subscriptionId={{billingSubId}}
+X-Tenant-Id: acme
+
+### List invoices for the subscription — tenant isolation check (expects empty content)
+GET {{baseUrl}}/api/invoices?subscriptionId={{billingSubId}}
+X-Tenant-Id: demo
+
+### List all invoices for the tenant
+GET {{baseUrl}}/api/invoices
+X-Tenant-Id: acme
