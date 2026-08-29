@@ -47,4 +47,10 @@ public class PlanService {
         String tenantId = TenantContext.getTenantId();
         return plans.findByTenantId(tenantId, pageable);
     }
+
+    public PlanEntity getByCode(String code) {
+        String tenantId = TenantContext.getTenantId();
+        return plans.findByTenantIdAndCode(tenantId, code)
+                .orElseThrow(() -> new ResourceNotFoundException("Plan", code));
+    }
 }

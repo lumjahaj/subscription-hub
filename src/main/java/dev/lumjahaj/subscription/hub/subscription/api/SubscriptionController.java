@@ -5,13 +5,15 @@ import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionResponse;
 import dev.lumjahaj.subscription.hub.subscription.api.mapper.SubscriptionMapper;
 import dev.lumjahaj.subscription.hub.subscription.app.SubscriptionService;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
+import dev.lumjahaj.subscription.hub.common.api.PagedResponse;
 import jakarta.validation.Valid;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.util.UriComponentsBuilder;
 
+import java.net.URI;
 import java.util.UUID;
 
 @RestController
@@ -27,9 +29,16 @@ public class SubscriptionController {
     @PostMapping
     public ResponseEntity<SubscriptionResponse> create(@Valid @RequestBody SubscriptionCreateRequest request) {
         SubscriptionEntity created = subscriptionService.create(request);
-        return ResponseEntity
-                .status(HttpStatus.CREATED)
-                .body(SubscriptionMapper.toResponse(created));
+        URI location = UriComponentsBuilder.fromPath("/api/subscriptions/{id}")
+                .buildAndExpand(created.getId())
+                .toUri();
+        return ResponseEntity.created(location).body(SubscriptionMapper.toResponse(created));
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<SubscriptionResponse> getById(@PathVariable UUID id) {
+        SubscriptionEntity subscription = subscriptionService.getById(id);
+        return ResponseEntity.ok(SubscriptionMapper.toResponse(subscription));
     }
 
     @PostMapping("/{id}/cancel")
@@ -51,13 +60,13 @@ public class SubscriptionController {
     }
 
     @GetMapping
-    public ResponseEntity<Page<SubscriptionResponse>> list(
+    public ResponseEntity<PagedResponse<SubscriptionResponse>> list(
             @RequestParam(required = false) UUID customerId,
             Pageable pageable
     ) {
         Page<SubscriptionEntity> page = customerId != null
                 ? subscriptionService.listByCustomer(customerId, pageable)
                 : subscriptionService.list(pageable);
-        return ResponseEntity.ok(page.map(SubscriptionMapper::toResponse));
+        return ResponseEntity.ok(PagedResponse.from(page, SubscriptionMapper::toResponse));
     }
 }

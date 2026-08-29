@@ -5,6 +5,7 @@ import dev.lumjahaj.subscription.hub.catalog.api.mapper.ProductMapper;
 import dev.lumjahaj.subscription.hub.catalog.domain.ProductRepository;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.ProductEntity;
 import dev.lumjahaj.subscription.hub.common.api.ResourceAlreadyExistsException;
+import dev.lumjahaj.subscription.hub.common.api.ResourceNotFoundException;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -38,5 +39,11 @@ public class ProductService {
     public Page<ProductEntity> list(Pageable pageable) {
         String tenantId = TenantContext.getTenantId();
         return products.findByTenantId(tenantId, pageable);
+    }
+
+    public ProductEntity getByCode(String code) {
+        String tenantId = TenantContext.getTenantId();
+        return products.findByTenantIdAndCode(tenantId, code)
+                .orElseThrow(() -> new ResourceNotFoundException("Product", code));
     }
 }

@@ -96,6 +96,10 @@ public class SubscriptionService {
         return subscriptions.save(subscription);
     }
 
+    public SubscriptionEntity getById(UUID id) {
+        return findOwned(id);
+    }
+
     private SubscriptionEntity findOwned(UUID id) {
         String tenantId = TenantContext.getTenantId();
         return subscriptions.findByTenantIdAndId(tenantId, id)
