@@ -24,11 +24,9 @@ spring:
 server:
   port: 8080
 
-subscription:
-  renewal:
-    cron: "0 0 * * * *"   # hourly, on the hour
-
 billing:
+  cycle:
+    cron: "0 0 * * * *"   # hourly, on the hour - invoices then renews each due subscription
   invoice:
     due-days: 14
 

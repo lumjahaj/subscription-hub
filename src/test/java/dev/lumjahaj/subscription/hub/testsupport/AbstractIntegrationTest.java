@@ -6,6 +6,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.http.HttpHeaders;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
@@ -24,8 +25,16 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * first container's JDBC URL. The second integration test class to run then
  * talks to a dead port. Starting it here in a static initializer instead gives
  * it JVM-wide lifetime; Ryuk reaps it on exit.
+ *
+ * billing.cycle.cron is overridden to "-" (Spring's disabled-cron sentinel)
+ * here on the shared base rather than per-subclass, so every subclass shares
+ * the same context-cache key. Without this, BillingCycleJob's hourly
+ * schedule could fire mid-test and invoice or renew a subscription a test
+ * is in the middle of asserting against - a pre-existing latent flake this
+ * closes for every integration test, not just the billing ones.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@TestPropertySource(properties = "billing.cycle.cron=-")
 public abstract class AbstractIntegrationTest {
 
     @ServiceConnection

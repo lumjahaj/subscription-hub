@@ -29,7 +29,7 @@ public class SubscriptionRenewalService {
      *
      * Callable directly with a single id: this is the seam a future
      * Stripe webhook handler calls into once it knows exactly which
-     * subscription renewed, bypassing RenewalJob's "find due ones" scan
+     * subscription renewed, bypassing BillingCycleJob's "find due ones" scan
      * entirely.
      */
     @Transactional
