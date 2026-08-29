@@ -23,4 +23,13 @@ public interface UsageCounterRepository {
             Instant periodStart, Instant periodEnd, BigDecimal amount);
 
     List<UsageCounterEntity> findByTenantIdAndSubscriptionId(String tenantId, UUID subscriptionId);
+
+    /**
+     * Billing reads counters by the exact period boundary the invoice
+     * covers - periodStart is part of both this key and
+     * uk_usage_counter_tenant_sub_meter_period, so the join is exact by
+     * construction rather than by reconstructed arithmetic.
+     */
+    List<UsageCounterEntity> findByTenantIdAndSubscriptionIdAndPeriodStart(
+            String tenantId, UUID subscriptionId, Instant periodStart);
 }

@@ -33,7 +33,9 @@ public class ProblemDetailsAdvice {
             "uk_product_tenant_code", "Product",
             "uk_customer_tenant_email", "Customer",
             "uk_plan_tenant_code", "Plan",
-            "uk_plan_ent_tenant_plan_key", "PlanEntitlement"
+            "uk_plan_ent_tenant_plan_key", "PlanEntitlement",
+            "uk_invoice_tenant_number", "Invoice",
+            "uk_invoice_tenant_sub_period", "Invoice"
     );
 
     private ProblemDetail base(HttpStatus status, String code, String message) {

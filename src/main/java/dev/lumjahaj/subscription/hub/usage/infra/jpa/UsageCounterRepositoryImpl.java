@@ -29,4 +29,10 @@ public class UsageCounterRepositoryImpl implements UsageCounterRepository {
     public List<UsageCounterEntity> findByTenantIdAndSubscriptionId(String tenantId, UUID subscriptionId) {
         return jpaRepository.findByTenantIdAndSubscriptionId(tenantId, subscriptionId);
     }
+
+    @Override
+    public List<UsageCounterEntity> findByTenantIdAndSubscriptionIdAndPeriodStart(
+            String tenantId, UUID subscriptionId, Instant periodStart) {
+        return jpaRepository.findByTenantIdAndSubscriptionIdAndPeriodStart(tenantId, subscriptionId, periodStart);
+    }
 }

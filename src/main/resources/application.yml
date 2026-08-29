@@ -28,6 +28,10 @@ subscription:
   renewal:
     cron: "0 0 * * * *"   # hourly, on the hour
 
+billing:
+  invoice:
+    due-days: 14
+
 management:
   endpoints:
     web:

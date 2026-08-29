@@ -13,6 +13,9 @@ public interface UsageCounterJpaRepository extends JpaRepository<UsageCounterEnt
 
     List<UsageCounterEntity> findByTenantIdAndSubscriptionId(String tenantId, UUID subscriptionId);
 
+    List<UsageCounterEntity> findByTenantIdAndSubscriptionIdAndPeriodStart(
+            String tenantId, UUID subscriptionId, Instant periodStart);
+
     /**
      * The project's first native/nativeQuery = true query - and the one
      * place @TenantId's automatic "tenant_id =" predicate (see
