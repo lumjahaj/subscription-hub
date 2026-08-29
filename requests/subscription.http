@@ -149,6 +149,18 @@ X-Tenant-Id: acme
     client.global.set("transitionSubId", response.body.id);
 %}
 
+### Get Subscription — by id
+GET {{baseUrl}}/api/subscriptions/{{transitionSubId}}
+X-Tenant-Id: acme
+
+### Get Subscription — unknown id (expects 404 SUBSCRIPTION_NOT_FOUND)
+GET {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000
+X-Tenant-Id: acme
+
+### Get Subscription — tenant isolation: acme's id under demo (expects 404 SUBSCRIPTION_NOT_FOUND)
+GET {{baseUrl}}/api/subscriptions/{{transitionSubId}}
+X-Tenant-Id: demo
+
 ### Pause — TRIALING -> PAUSED (expects 200, status PAUSED)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/pause
 X-Tenant-Id: acme

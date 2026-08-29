@@ -9,6 +9,10 @@ X-Tenant-Id: acme
   "name": "Jane Doe"
 }
 
+> {%
+    client.global.set("janeId", response.body.id);
+%}
+
 ### Create Customer — no externalId (optional field)
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
@@ -73,4 +77,16 @@ X-Tenant-Id: acme
 
 ### List Customers — tenant isolation check (demo should not see acme's customers)
 GET {{baseUrl}}/api/customers
+X-Tenant-Id: demo
+
+### Get Customer — by id
+GET {{baseUrl}}/api/customers/{{janeId}}
+X-Tenant-Id: acme
+
+### Get Customer — unknown id (expects 404 CUSTOMER_NOT_FOUND)
+GET {{baseUrl}}/api/customers/00000000-0000-0000-0000-000000000000
+X-Tenant-Id: acme
+
+### Get Customer — tenant isolation: acme's id under demo (expects 404 CUSTOMER_NOT_FOUND)
+GET {{baseUrl}}/api/customers/{{janeId}}
 X-Tenant-Id: demo

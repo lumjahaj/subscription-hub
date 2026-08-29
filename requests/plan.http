@@ -130,6 +130,18 @@ X-Tenant-Id: acme
 GET {{baseUrl}}/api/plans
 X-Tenant-Id: demo
 
+### Get Plan — by code
+GET {{baseUrl}}/api/plans/pro-monthly
+X-Tenant-Id: acme
+
+### Get Plan — unknown code (expects 404 PLAN_NOT_FOUND)
+GET {{baseUrl}}/api/plans/does-not-exist
+X-Tenant-Id: acme
+
+### Get Plan — tenant isolation: acme's plan code under demo (expects 404 PLAN_NOT_FOUND)
+GET {{baseUrl}}/api/plans/pro-monthly
+X-Tenant-Id: demo
+
 
 ### ============================================================
 ### PlanEntitlement — depends on pro-monthly existing (created above)

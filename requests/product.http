@@ -94,3 +94,16 @@ X-Tenant-Id: acme
 ### List Products — tenant isolation check (demo tenant should NOT see acme's products)
 GET {{baseUrl}}/api/products
 X-Tenant-Id: demo
+
+### Get Product — by code
+GET {{baseUrl}}/api/products/messaging
+X-Tenant-Id: acme
+
+### Get Product — unknown code (expects 404 PRODUCT_NOT_FOUND)
+GET {{baseUrl}}/api/products/does-not-exist
+X-Tenant-Id: acme
+
+### Get Product — tenant isolation: demo also has a "messaging" product (created above).
+### Must return demo's own row (name "Messaging API (demo tenant)"), not acme's.
+GET {{baseUrl}}/api/products/messaging
+X-Tenant-Id: demo
