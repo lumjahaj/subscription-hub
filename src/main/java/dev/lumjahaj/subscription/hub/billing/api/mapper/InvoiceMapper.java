@@ -29,6 +29,7 @@ public final class InvoiceMapper {
                 entity.getIssuedAt(),
                 entity.getDueAt(),
                 entity.getLines().stream().map(InvoiceMapper::toLineResponse).toList(),
+                entity.getPdfObjectKey() != null,
                 entity.getCreatedAt(),
                 entity.getUpdatedAt()
         );

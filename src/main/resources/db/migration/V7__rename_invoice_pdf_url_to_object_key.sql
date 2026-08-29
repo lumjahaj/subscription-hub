@@ -1,0 +1,17 @@
+-- invoice.pdf_url has existed since V1 and has never been written to.
+-- Now that billing actually produces PDFs, it holds an object key
+-- ("acme/INV-000001.pdf"), not a URL - the bytes are streamed back
+-- through GET /api/invoices/{id}/pdf so every download passes
+-- TenantResolverFilter, rather than handing out a direct MinIO link that
+-- would bypass tenant isolation entirely.
+--
+-- Renaming rather than living with the wrong name follows V4/V5/V6: the
+-- column is completely unused (no row has ever set it), so this costs
+-- nothing, and a column whose name says "url" while holding a key is
+-- exactly the kind of quiet lie those migrations existed to fix.
+--
+-- Stays nullable: an invoice exists before its PDF does, and PDF
+-- generation is deliberately decoupled from invoice generation so a
+-- storage outage can't fail a billing run. NULL here means "not
+-- generated yet", which is what InvoiceResponse.pdfAvailable reports.
+ALTER TABLE invoice RENAME COLUMN pdf_url TO pdf_object_key;

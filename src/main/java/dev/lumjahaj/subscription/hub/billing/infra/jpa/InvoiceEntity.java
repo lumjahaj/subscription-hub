@@ -62,6 +62,14 @@ public class InvoiceEntity extends TenantScoped {
     @Column(name = "due_at")
     private Instant dueAt;
 
+    // Nullable by design: an invoice exists before its PDF does, because
+    // PDF generation is decoupled from invoice generation so a storage
+    // outage can't fail a billing run. NULL means "not generated yet".
+    // Holds an object key ("acme/INV-000001.pdf"), not a URL — the column
+    // was named pdf_url in V1 and renamed in V7 to stop it lying.
+    @Column(name = "pdf_object_key")
+    private String pdfObjectKey;
+
     // The codebase's first @OneToMany. An invoice and its lines are one
     // aggregate — written in a single transaction, a line has no lifetime
     // apart from its invoice, and totalCents is only correct if computed
@@ -105,6 +113,8 @@ public class InvoiceEntity extends TenantScoped {
     public void setIssuedAt(Instant issuedAt) { this.issuedAt = issuedAt; }
     public Instant getDueAt() { return dueAt; }
     public void setDueAt(Instant dueAt) { this.dueAt = dueAt; }
+    public String getPdfObjectKey() { return pdfObjectKey; }
+    public void setPdfObjectKey(String pdfObjectKey) { this.pdfObjectKey = pdfObjectKey; }
     public List<InvoiceLineEntity> getLines() { return lines; }
 
     public void addLine(InvoiceLineEntity line) {
