@@ -35,10 +35,19 @@ Read these before suggesting anything.
 
 Java 21 · Spring Boot 3.5.6 · Maven · Spring Web / Data JPA / Validation /
 Security · Hibernate 6 · PostgreSQL 17 · Flyway · Testcontainers · Docker Compose ·
-springdoc-openapi 2.8.x
+springdoc-openapi 2.8.x · MinIO (invoice PDFs) · AWS SDK v2 for S3 ·
+openhtmltopdf + Thymeleaf
 
-Planned: JWT, Redis, MinIO (invoice PDFs), MailHog/Mailpit, WireMock, Micrometer,
-Prometheus, Grafana.
+The object store is reached with the **AWS SDK, not the MinIO client** — MinIO is
+S3-compatible, so the vendor stays a config value and the same adapter works
+against real S3/R2 by changing an endpoint.
+
+Thymeleaf is present as a **library only** (`org.thymeleaf:thymeleaf`), never
+`spring-boot-starter-thymeleaf`: it renders the invoice HTML that openhtmltopdf
+turns into a PDF. This is a pure JSON API with no MVC view layer, and the starter
+would wire one in.
+
+Planned: JWT, Redis, MailHog/Mailpit, WireMock, Micrometer, Prometheus, Grafana.
 
 Everything must stay **free and locally runnable**.
 
@@ -60,9 +69,14 @@ catalog/         api, app, domain, infra/jpa
 customer/        api, app, domain, infra/jpa
 subscription/    api, app, domain, infra/jpa
 usage/           api, app, domain, infra/jpa
-billing/         api, app, domain, infra/jpa
+billing/         api, app, domain, infra/{jpa, pdf, storage}
 audit/           (not built)
 ```
+
+`billing` is the first module with more than one `infra` package. `infra/jpa`
+adapts the database, `infra/storage` adapts the object store, and `infra/pdf`
+adapts the rendering library — three different outside systems, each behind its
+own port, rather than one catch-all `infra`.
 
 Dependency direction: **`api → app → domain ← infra`**
 
@@ -193,6 +207,16 @@ three commits:
 - **Invariant: exactly one container per build.**
   `./mvnw -B verify | grep -c "Container is started (JDBC URL"` must print `1`.
   It printed `3` for three commits and nobody looked.
+  That grep matches a **JDBC-specific** log line, so it counts Postgres
+  containers only. `AbstractIntegrationTest` also starts a MinIO container for
+  invoice PDFs, which never emits that line — two containers per build is
+  expected, and the check still means "one Postgres". Don't "fix" the grep to
+  match both and then panic at `2`.
+- Property overrides (`@TestPropertySource`, `@DynamicPropertySource`) go on
+  `AbstractIntegrationTest`, **never** a subclass — each distinct set of
+  properties is a separate Spring context-cache key, so a subclass-level
+  override silently builds a second context, and with it a second set of
+  containers.
 - Verify with a **full `./mvnw verify`**, never a single class. A per-class run
   structurally cannot catch a cross-class lifecycle bug — the JVM exits first.
   Surefire's default `runOrder` is `filesystem`, which differs between Windows
@@ -231,7 +255,8 @@ tenant (id varchar(64) PK — slug)
  ├── subscription        (customer_id, plan_id, status, period/renewal/cancel timestamps)
  │    ├── subscription_entitlement_override
  │    └── usage_counter
- ├── invoice → invoice_line   (unique tenant_id + subscription_id + period_start; period_start/end added in V6)
+ ├── invoice → invoice_line   (unique tenant_id + subscription_id + period_start; period_start/end added in V6;
+ │                              pdf_object_key nullable — renamed from pdf_url in V7, holds an object key not a URL)
  └── audit_event
 
 invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
@@ -427,6 +452,61 @@ Seeded tenants for local dev: `acme`, `demo`.
     already billed on a prior partial run, so renewal proceeds; any other
     invoicing failure leaves the subscription due rather than renewing past
     an unbilled period.
+- **Invoice PDFs** — `billing/infra/pdf` + `billing/infra/storage`, activating
+  the `pdf_url` column that had been unused since V1 (V7 renames it to
+  `pdf_object_key`, since it holds an object key like `acme/INV-000001.pdf`,
+  never a URL).
+  - Rendering is HTML → PDF: `InvoicePdfRenderer` builds an `InvoicePdfView`,
+    runs it through a Thymeleaf template (`resources/templates/invoice.html`),
+    and pipes the HTML through openhtmltopdf. Drawing to a PDF canvas with
+    PDFBox directly would mean hand-computing row offsets, column widths and
+    string widths to right-align money, plus page breaks — all free from the
+    HTML/CSS engine, and the layout ends up in a template a non-Java reader
+    can edit. The renderer owns its `TemplateEngine` privately rather than
+    exposing a bean, so nothing else can accidentally couple to Thymeleaf.
+  - **Money leaves integer minor units in exactly one place**: the view model,
+    via `BigDecimal.valueOf(cents, 2)` — which repositions the decimal point on
+    an exact integer, no division and no floating point. The template does no
+    arithmetic at all, so the §5 money rule holds right up to the moment the
+    number becomes text.
+  - `POST /api/invoices/{id}/pdf` generates (409 `INVOICE_PDF_ALREADY_GENERATED`
+    on a second call — an invoice is immutable once issued, so its PDF is too);
+    `GET /api/invoices/{id}/pdf` streams it back as `application/pdf` with a
+    `Content-Disposition` filename of the invoice number. 404
+    `INVOICE_PDF_NOT_GENERATED` if it hasn't been generated yet.
+  - **Bytes stream back through the API, never via a presigned object-store
+    URL.** That keeps every download inside the tenant-scoped request path
+    (`TenantResolverFilter` plus the `findByTenantIdAndId` ownership check),
+    and means the bucket is unreachable from outside the application. The
+    controller returns an `InputStreamResource` so bytes go from the store to
+    the socket without being buffered whole.
+  - Both PDF errors are distinct `BusinessRuleViolationException` subclasses
+    rather than the generic resource shapes. §5 says not to invent per-entity
+    classes for exists/not-found — but the PDF has no identifier of its own, so
+    these describe a *state of the invoice* ("exists but not generated yet" is
+    genuinely different from "no such invoice", and callers act differently on
+    each), and the generic types would emit mangled codes like
+    `INVOICEPDF_NOT_FOUND`.
+  - The bucket is created **lazily on first write**, not `@PostConstruct`: a
+    startup check would stop the whole application booting whenever the object
+    store is down, coupling every endpoint to a dependency only this feature
+    needs. It also means neither local dev nor Testcontainers needs a bucket
+    provisioning step.
+  - Object keys are tenant-prefixed (`{tenantId}/{number}.pdf`) because invoice
+    numbers restart per tenant. That is a storage-layout convenience, **not** a
+    security boundary — isolation comes from loading the invoice through
+    `findByTenantIdAndId` before its key is ever read.
+  - Generation is deliberately *not* folded into
+    `InvoiceService.generateForCurrentPeriod`: that would put a remote call
+    inside the billing transaction and let a storage outage fail a revenue
+    path. `InvoicePdfService.generatePdf` does hold a transaction across the
+    upload, which is the same shape — the difference is that there the upload
+    was an unrelated side effect, whereas here storing the bytes *is* the
+    operation, and the render/upload happen before the entity is mutated so a
+    failure rolls back a transaction that wrote nothing.
+  - `InvoiceResponse.pdfAvailable` is a boolean, not the object key: the key is
+    internal storage layout and is tenant-prefixed, so exposing it would leak
+    both where bytes live and the tenant id that never appears in a body.
 
 **Endpoints:**
 ```
@@ -444,6 +524,7 @@ POST GET      /api/subscriptions/{subscriptionId}/usage
 POST GET      /api/subscriptions/{subscriptionId}/invoices
 GET            /api/invoices[?subscriptionId=]
 GET            /api/invoices/{id}
+POST GET      /api/invoices/{id}/pdf
 ```
 
 ---
@@ -451,10 +532,11 @@ GET            /api/invoices/{id}
 ## 8. Roadmap
 
 Subscription state transitions (cancel/pause/resume), renewal processing,
-usage metering, and billing/invoice calculation are done — see §7.
+usage metering, billing/invoice calculation, and invoice PDFs (MinIO) are
+done — see §7.
 
-Next: Invoice PDFs (MinIO) →
-Mock payments → Dunning (`PAST_DUE`) → Notifications (MailHog) → Audit events →
+Next: Mock payments → Dunning (`PAST_DUE`) → Notifications (MailHog — the PDF
+is the attachment, which is why it came first) → Audit events →
 JWT + RBAC (`ADMIN`, `BILLING`, `SUPPORT`, `USER`) → Observability
 (Actuator, Micrometer, Prometheus, Grafana).
 
@@ -536,6 +618,31 @@ feature module does.
   invoice is additionally meant to be immutable once issued (see §7), so
   "no update" here is a stronger property than the same gap on Product/
   Plan/Customer/Subscription, not just an unaddressed one.
+
+**Invoice PDFs**
+
+- **Presigned URLs are the deliberate non-choice.** Every download streams
+  through the application so it stays inside the tenant-scoped request path.
+  At real scale you'd hand out a short-lived presigned object-store URL and
+  let the store serve the bytes — that removes the app from the data path
+  entirely, at the cost of a URL that authorizes by possession rather than by
+  tenant context. Worth being able to argue both ways.
+- **No regeneration path.** A second `POST` is a 409, deliberately: an invoice
+  is immutable once issued, so its PDF is too. If the *template* changes,
+  existing PDFs keep the old layout and there is no way to re-render them
+  short of clearing `pdf_object_key` by hand. That's arguably correct for a
+  financial document, but it is a real constraint, not an oversight.
+- **PDFs are never deleted**, so object storage grows without bound. No
+  lifecycle policy, no cleanup when a tenant is removed (the `invoice` row
+  cascades from `tenant`, but the stored object does not).
+- **Fonts are not embedded.** The template uses `sans-serif`, which
+  openhtmltopdf maps to a standard-14 PDF font; readers substitute a local
+  face. Fine for a portfolio, but a real invoice PDF would embed a font so it
+  renders identically everywhere and passes PDF/A.
+- The renderer and the storage adapter are both exercised against real
+  dependencies, but there is **no test for the storage failure path** — e.g.
+  that `BillingCycleJob` really does continue when MinIO is unreachable. That
+  behaviour is asserted only by reading the code.
 
 ---
 
