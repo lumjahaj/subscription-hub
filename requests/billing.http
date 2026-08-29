@@ -134,3 +134,52 @@ X-Tenant-Id: demo
 ### List all invoices for the tenant
 GET {{baseUrl}}/api/invoices
 X-Tenant-Id: acme
+
+
+### --- INVOICE PDFs ---
+### Requires MinIO to be up (docker compose up -d). The bucket is created
+### on the first upload, so no manual setup is needed. Note that the
+### IntelliJ HTTP client saves a binary PDF response to a file and shows
+### a link rather than rendering it inline.
+
+
+### Download PDF — before it has been generated
+### (expects 404 INVOICE_PDF_NOT_GENERATED, not INVOICE_NOT_FOUND: the
+### invoice exists, its PDF doesn't yet)
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
+X-Tenant-Id: acme
+
+### Generate the PDF (expects 201, Location header, pdfAvailable: true)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
+X-Tenant-Id: acme
+
+### Generate again for the same invoice
+### (expects 409 INVOICE_PDF_ALREADY_GENERATED — an invoice is immutable
+### once issued, so its PDF is too)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
+X-Tenant-Id: acme
+
+### Download the PDF (expects 200 application/pdf, Content-Disposition
+### attachment named after the invoice number, e.g. INV-000001.pdf)
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
+X-Tenant-Id: acme
+
+### Get invoice by id — now reports pdfAvailable: true
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
+X-Tenant-Id: acme
+
+### Generate PDF — unknown invoice id (expects 404 INVOICE_NOT_FOUND)
+POST {{baseUrl}}/api/invoices/00000000-0000-0000-0000-000000000000/pdf
+X-Tenant-Id: acme
+
+### Generate PDF — tenant isolation: acme's invoice id under demo
+### (expects 404 INVOICE_NOT_FOUND — must not leak or succeed)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
+X-Tenant-Id: demo
+
+### Download PDF — tenant isolation: acme's invoice id under demo
+### (expects 404 INVOICE_NOT_FOUND — the bytes must never be reachable
+### from another tenant, which is why downloads stream through the API
+### instead of via a presigned object-store URL)
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
+X-Tenant-Id: demo
