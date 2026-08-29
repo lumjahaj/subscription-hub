@@ -51,10 +51,34 @@ class SubscriptionLifecycleIntegrationTest extends AbstractIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         SubscriptionResponse body = response.getBody();
         assertThat(body.status()).isEqualTo(SubscriptionStatus.ACTIVE);
+        assertThat(response.getHeaders().getLocation()).hasPath("/api/subscriptions/" + body.id());
         // Calendar-month arithmetic (BillingPeriods.addInterval uses plusMonths),
         // not a fixed 30-day duration - months vary in length.
         Instant expectedPeriodEnd = Instant.now().atZone(ZoneOffset.UTC).plusMonths(1).toInstant();
         assertThat(body.currentPeriodEnd()).isCloseTo(expectedPeriodEnd, within(10, ChronoUnit.SECONDS));
+    }
+
+    @Test
+    void getById_returnsTheSubscription() {
+        UUID subscriptionId = createActiveSubscription();
+
+        ResponseEntity<SubscriptionResponse> response = restTemplate.exchange(
+                "/api/subscriptions/" + subscriptionId, HttpMethod.GET,
+                new HttpEntity<>(tenantHeaders(TENANT)), SubscriptionResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody().id()).isEqualTo(subscriptionId);
+    }
+
+    @Test
+    void getById_underAnotherTenant_returnsNotFound() {
+        UUID subscriptionId = createActiveSubscription();
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/subscriptions/" + subscriptionId, HttpMethod.GET,
+                new HttpEntity<>(tenantHeaders("demo")), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test
@@ -127,10 +151,8 @@ class SubscriptionLifecycleIntegrationTest extends AbstractIntegrationTest {
 
         assertThat(changed.get()).isTrue();
 
-        // pause response echoes the current row state, giving us the post-renewal
-        // periodEnd without needing a single-resource GET (a separate, known gap).
         ResponseEntity<SubscriptionResponse> after = restTemplate.exchange(
-                "/api/subscriptions/" + original.id() + "/pause", HttpMethod.POST,
+                "/api/subscriptions/" + original.id(), HttpMethod.GET,
                 new HttpEntity<>(tenantHeaders(TENANT)), SubscriptionResponse.class);
 
         // isCloseTo, not isEqualTo: currentPeriodStart round-trips through the DB's
