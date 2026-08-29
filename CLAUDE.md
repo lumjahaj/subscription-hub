@@ -59,8 +59,8 @@ tenancy/         api, domain, infra
 catalog/         api, app, domain, infra/jpa
 customer/        api, app, domain, infra/jpa
 subscription/    api, app, domain, infra/jpa
-usage/           (not built)
-billing/         (not built)
+usage/           api, app, domain, infra/jpa
+billing/         api, app, domain, infra/jpa
 audit/           (not built)
 ```
 
@@ -123,9 +123,10 @@ on every tenant-owned table.
 `findByTenantIdAndCode(...)`, never `findByCode(...)`. This is no longer the
 *only* thing enforcing isolation — see §9 — but it stays mandatory as defense
 in depth: the structural backstop only covers Hibernate-mediated queries, not
-a native/`nativeQuery = true` one. There's now exactly one of those —
-`UsageCounterJpaRepository.upsertAndIncrement` (see §7) — and `tenantId` is
-bound explicitly in its SQL for exactly this reason.
+a native/`nativeQuery = true` one. There are now two of those —
+`UsageCounterJpaRepository.upsertAndIncrement` and
+`InvoiceJpaRepository.allocateNextNumber` (see §7) — and `tenantId` is bound
+explicitly in both for exactly this reason.
 
 ---
 
@@ -172,7 +173,12 @@ point.
   `columnDefinition`
 
 Without these, Hibernate binds as `varchar` and Postgres rejects the statement.
-The same applies to `invoice_status` when Billing is built.
+The same applies to `invoice_status` (`InvoiceEntity.status`). The inverse trap
+bit once Billing was built: `invoice_line.kind` is `varchar(16)`, not a
+Postgres enum, so `InvoiceLineEntity.kind` deliberately gets plain
+`@Enumerated(EnumType.STRING)` — the NAMED_ENUM combo there would bind a
+nonexistent type and fail at startup. Same category of bug, opposite fix;
+check the column's actual Postgres type before reaching for the combo.
 
 **Integration tests + Testcontainers** — this has bitten once, silently, for
 three commits:
@@ -225,14 +231,17 @@ tenant (id varchar(64) PK — slug)
  ├── subscription        (customer_id, plan_id, status, period/renewal/cancel timestamps)
  │    ├── subscription_entitlement_override
  │    └── usage_counter
- ├── invoice → invoice_line
+ ├── invoice → invoice_line   (unique tenant_id + subscription_id + period_start; period_start/end added in V6)
  └── audit_event
+
+invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
 ```
 
 Postgres enums: `subscription_status` (`TRIALING`, `ACTIVE`, `PAST_DUE`,
 `CANCELED`, plus `PAUSED` added in V2), `plan_interval_unit` (`MONTH`, `YEAR`,
 added in V3, replacing the old `plan.interval` string column), `invoice_status`
-(`DRAFT`, `OPEN`, `PAID`, `VOID`, `UNCOLLECTIBLE`).
+(`DRAFT`, `OPEN`, `PAID`, `VOID`, `UNCOLLECTIBLE` — only `OPEN` is producible
+today, see §7).
 
 Seeded tenants for local dev: `acme`, `demo`.
 
@@ -268,14 +277,16 @@ Seeded tenants for local dev: `acme`, `demo`.
   (`InvalidSubscriptionStateException` → 409 `INVALID_SUBSCRIPTION_STATE`;
   can't cancel a canceled subscription, can't resume one that isn't paused).
   Verified end-to-end via `subscription.http` and integration tests (below).
-- **Renewal processing** — `SubscriptionRenewalService`, cron-driven
-  (`subscription.renewal.cron`), rolls `TRIALING`/`ACTIVE` subscriptions
+- **Renewal processing** — `SubscriptionRenewalService.renewIfDue`, called from
+  `BillingCycleJob` (see below), rolls `TRIALING`/`ACTIVE` subscriptions
   forward one billing period once `nextRenewal` is due. Anchored to the old
   `currentPeriodEnd`, not `now`, so job lag never drifts the schedule going
   forward; self-healing (a subscription months overdue still only advances
   once per run, staying due for the next). Runs per-tenant under
   `TenantContext.runAs`, since a scheduled job has no request to populate the
-  ThreadLocal from.
+  ThreadLocal from. `SubscriptionRenewalService` itself is unchanged since it
+  was first built — only its caller changed, from `RenewalJob` to
+  `BillingCycleJob`.
 - Mapper/unit tests committed for Product, Plan, PlanEntitlement, Customer,
   Subscription, `BillingPeriods`, `SubscriptionRenewalService`, with shared
   validator setup extracted.
@@ -349,7 +360,73 @@ Seeded tenants for local dev: `acme`, `demo`.
   - No rollover logic needed: because `SubscriptionRenewalService` already
     sets `currentPeriodStart = oldPeriodEnd` on renewal, a new billing
     period naturally gets a fresh counter row (`period_start` is part of
-    the unique key) — `RenewalJob` needed no changes.
+    the unique key) — the renewal path itself needed no changes for billing.
+- **Billing** — `billing/` module, activates the `invoice`/`invoice_line`
+  tables that had existed unused since V1. `POST
+  /api/subscriptions/{subscriptionId}/invoices` generates an invoice for the
+  subscription's *current* period — read as `[currentPeriodStart,
+  currentPeriodEnd)` straight off the subscription row, the same two fields
+  `usage_counter` is keyed by, so usage lines join to counters exactly rather
+  than by reconstructing a closed period's boundaries after renewal has
+  already overwritten them. A period must be closed (`now >=
+  currentPeriodEnd`) before it can be invoiced — 409 `INVOICE_PERIOD_NOT_CLOSED`
+  otherwise — since both the base charge and usage charges land on one
+  invoice for that period.
+  - One `BASE` line for the plan's recurring `amountCents`, plus one `USAGE`
+    line per metered counter that has a matching priced entitlement and
+    usage over its included quantity. Usage prices live in the existing
+    `plan_entitlement` jsonb (`{"includedQuantity": N, "unitAmountCents": N}`)
+    rather than a new table — an entitlement without `unitAmountCents` is
+    simply not a priced meter and is skipped, not an error, since
+    `plan_entitlement` is a general-purpose bag most entries don't use for
+    pricing. This is the table's first real use beyond being stored and
+    echoed back.
+  - `InvoiceCalculator` (pure, package-private, mirrors
+    `SubscriptionRenewalService.applyRenewal`'s split from load/save) rounds
+    the `BigDecimal` quantity × `long unitAmountCents` product `HALF_UP` to
+    whole cents, exactly once per line — `total_cents` is the sum of
+    already-rounded line amounts, never a separately rounded total, so the
+    two always agree.
+  - Invoice numbers (`INV-000001`, per tenant) come from
+    `InvoiceJpaRepository.allocateNextNumber`, the project's **second**
+    native query, for the same reason as the first: a read-modify-write on
+    `invoice_number_sequence` would race two concurrent invoice generations
+    for one tenant into the same number. `tenantId` bound explicitly, same
+    as `upsertAndIncrement`.
+  - Idempotency is enforced twice: `generateForCurrentPeriod` checks for an
+    existing invoice for that period before generating, and
+    `uk_invoice_tenant_sub_period` (V6) catches the concurrent race the
+    check can't — both map to 409 `INVOICE_ALREADY_EXISTS` via
+    `ProblemDetailsAdvice`.
+  - Only `InvoiceStatus.OPEN` is produced today. Issuing straight to `OPEN`
+    (never `DRAFT`) makes an invoice immutable once generated, which is what
+    makes the period-based unique key a sufficient idempotency guard —
+    `PAID`/`VOID`/`UNCOLLECTIBLE` wait for payments and dunning.
+  - `InvoiceEntity.lines` is the codebase's first `@OneToMany`
+    (`cascade = ALL, orphanRemoval = true`) — justified because an invoice
+    and its lines are one aggregate, written together, with no independent
+    lifecycle for a line. `@BatchSize(32)` avoids the N+1 a paged list of
+    invoices would otherwise cause.
+  - V6 migration fixes five pre-existing defects in the V1 `invoice`/
+    `invoice_line` tables (missing `created_at`/`updated_at` on
+    `invoice_line`, `currency char(3)` vs. Hibernate's expected `varchar`,
+    `ON DELETE SET NULL` on a `NOT NULL` FK, an auto-named unique
+    constraint, a missing index) plus adds `period_start`/`period_end` and
+    `invoice_number_sequence`.
+  - **`BillingCycleJob`** replaces `RenewalJob` (cron property renamed
+    `subscription.renewal.cron` → `billing.cycle.cron`). Invoicing and
+    renewal are two steps of one process, not two independent jobs: once
+    `SubscriptionRenewalService.applyRenewal` advances a subscription, the
+    closed period's start is gone from the row, so running the two on
+    separate crons races and the losing side is unbilled revenue.
+    `BillingCycleJob` invoices then renews, per subscription, reusing the
+    existing `findByTenantIdAndStatusInAndNextRenewalLessThanEqual` finder
+    unchanged (a subscription it selects always has a closed current
+    period, since `nextRenewal == currentPeriodEnd` at every write site). A
+    `ResourceAlreadyExistsException` from invoicing means the period was
+    already billed on a prior partial run, so renewal proceeds; any other
+    invoicing failure leaves the subscription due rather than renewing past
+    an unbilled period.
 
 **Endpoints:**
 ```
@@ -364,6 +441,9 @@ GET            /api/customers/{id}
 POST GET      /api/subscriptions[?customerId=]
 GET            /api/subscriptions/{id}
 POST GET      /api/subscriptions/{subscriptionId}/usage
+POST GET      /api/subscriptions/{subscriptionId}/invoices
+GET            /api/invoices[?subscriptionId=]
+GET            /api/invoices/{id}
 ```
 
 ---
@@ -371,9 +451,9 @@ POST GET      /api/subscriptions/{subscriptionId}/usage
 ## 8. Roadmap
 
 Subscription state transitions (cancel/pause/resume), renewal processing,
-and usage metering are done — see §7.
+usage metering, and billing/invoice calculation are done — see §7.
 
-Next: Billing/invoice calculation → Invoice PDFs (MinIO) →
+Next: Invoice PDFs (MinIO) →
 Mock payments → Dunning (`PAST_DUE`) → Notifications (MailHog) → Audit events →
 JWT + RBAC (`ADMIN`, `BILLING`, `SUPPORT`, `USER`) → Observability
 (Actuator, Micrometer, Prometheus, Grafana).
@@ -396,10 +476,11 @@ feature module does.
   Postgres — a crafted cross-tenant lookup 404s rather than leaking or
   mutating another tenant's row, and the same natural key succeeds under two
   tenants without colliding. It still does **not** protect
-  native/`nativeQuery = true` queries — there is now exactly one,
-  `UsageCounterJpaRepository.upsertAndIncrement` (see §7), which binds
-  `tenantId` by hand instead — or anything outside Hibernate entirely (a raw
-  JDBC script, a future reporting tool). Postgres row-level security remains
+  native/`nativeQuery = true` queries — there are now two,
+  `UsageCounterJpaRepository.upsertAndIncrement` and
+  `InvoiceJpaRepository.allocateNextNumber` (see §7), which bind `tenantId`
+  by hand instead — or anything outside Hibernate entirely (a raw JDBC
+  script, a future reporting tool). Postgres row-level security remains
   the stronger, DB-level option for those cases — deliberately not done yet;
   the Testcontainers harness that was the prerequisite for verifying it
   properly now exists, so RLS is next up if the `SET LOCAL`/HikariCP wiring
@@ -418,8 +499,12 @@ feature module does.
   just unit-tested in isolation (see §7). `ProblemDetailsAdviceTest` covers
   the check-then-save race's 409 mapping deterministically (constructing the
   `DataIntegrityViolationException` directly, rather than racing two real
-  requests). Remaining gap: billing totals aren't testable until Billing is
-  built.
+  requests). ~~Billing totals aren't testable until Billing is built~~ —
+  closed: `InvoiceCalculatorTest` covers the cent-rounding arithmetic in
+  isolation, and `InvoiceGenerationIntegrationTest`/`BillingCycleIntegrationTest`
+  prove the usage-counter-to-invoice join and the invoice-before-renew
+  ordering against a real Postgres, including a 10-thread concurrent
+  generation test mirroring usage metering's concurrency proof.
 
 **API completeness**
 
@@ -431,9 +516,26 @@ feature module does.
 
 **Smaller**
 
-- No currency consistency rule — nothing prevents a tenant from mixing
-  currencies across plans a single invoice would later combine.
+- ~~No currency consistency rule~~ — moot for now, not solved: every
+  invoice covers exactly one subscription → one plan → one currency, so
+  nothing can mix *by construction*, not because a rule prevents it. The
+  gap returns the day invoices are ever consolidated across a customer's
+  subscriptions, and it's latent one level down too — a
+  `plan_entitlement` unit price (`unitAmountCents`) carries no currency of
+  its own, implicitly inheriting the parent plan's; that's the one place a
+  mismatch could hide today, invisible because the two are always read
+  together.
 - `audit_event` table exists but nothing writes to it.
+- Only `InvoiceStatus.OPEN` is ever set — `DRAFT`, `PAID`, `VOID`, and
+  `UNCOLLECTIBLE` are declared (they must match the Postgres enum exactly)
+  but nothing in the code produces them yet. Deliberate: better an
+  honestly-unused enum value than an invented lifecycle with no logic
+  behind it. `PAID`/`VOID`/`UNCOLLECTIBLE` arrive with payments and
+  dunning.
+- No update or delete on invoices either, same as everywhere else — an
+  invoice is additionally meant to be immutable once issued (see §7), so
+  "no update" here is a stronger property than the same gap on Product/
+  Plan/Customer/Subscription, not just an unaddressed one.
 
 ---
 
