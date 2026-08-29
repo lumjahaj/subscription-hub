@@ -291,15 +291,39 @@ Seeded tenants for local dev: `acme`, `demo`.
   `main`; tests self-provision Postgres via Testcontainers, no fixed service
   container needed.
 - README covering architecture, multi-tenancy model, and local setup.
+- **API hardening pass** — closed the three gaps §9 flagged as mattering more
+  than the next feature module:
+  - `ProblemDetailsAdvice` now maps a unique-constraint
+    `DataIntegrityViolationException` to the same 409 the check-then-save
+    path returns, instead of falling through to a 500. Matches on constraint
+    name via `org.hibernate.exception.ConstraintViolationException`; V4
+    renames Postgres's auto-generated constraint names
+    (`product_tenant_id_code_key`, ...) to the `uk_*` names the entities'
+    `@UniqueConstraint(name = ...)` already declared but that
+    `ddl-auto: validate` never enforced, so the two were silently out of
+    sync. An unrecognized constraint (FK, not-null) still falls through to
+    the generic 500 — this only catches the uniqueness case. Both the
+    generic and this handler now log the exception; previously
+    `handleGeneric` swallowed it entirely.
+  - `common/api/PagedResponse<T>` replaces raw `Page<T>` on every list
+    endpoint (`products`, `plans`, `customers`, `subscriptions`) — `PageImpl`
+    serialization isn't a documented contract.
+  - `GET /{code}` (Product, Plan) / `GET /{id}` (Customer, Subscription)
+    single-resource reads, and 201 responses now carry a real `Location`
+    header via `UriComponentsBuilder`.
 
 **Endpoints:**
 ```
 GET  /api/health
-POST GET /api/products
-POST GET /api/plans
-POST GET /api/plans/{planCode}/entitlements
-POST GET /api/customers
-POST GET /api/subscriptions[?customerId=]
+POST GET      /api/products
+GET            /api/products/{code}
+POST GET      /api/plans
+GET            /api/plans/{code}
+POST GET      /api/plans/{planCode}/entitlements
+POST GET      /api/customers
+GET            /api/customers/{id}
+POST GET      /api/subscriptions[?customerId=]
+GET            /api/subscriptions/{id}
 ```
 
 ---
@@ -338,28 +362,29 @@ feature module does.
   deliberately not done yet; the Testcontainers harness that was the
   prerequisite for verifying it properly now exists, so RLS is next up if the
   `SET LOCAL`/HikariCP wiring is worth it.
-- **Check-then-save uniqueness race.** `findByTenantIdAndCode(...).ifPresent(throw)`
-  followed by `save(...)` isn't atomic. The DB constraint catches it, but the
-  resulting `DataIntegrityViolationException` currently falls through to a
-  generic 500. Catch it and map to the same 409.
-- **`Page<T>` serialization.** Spring warns about serializing `PageImpl`
-  directly; the JSON shape isn't a stable API contract. A small `PagedResponse<T>`
-  wrapper would be more honest as a public API.
+- ~~Check-then-save uniqueness race~~ — closed. See §7's API hardening pass.
+  `findByTenantIdAndCode(...).ifPresent(throw)` followed by `save(...)` is
+  still not atomic, but the losing side of the race now gets the same 409
+  a synchronous duplicate does, instead of a 500.
+- ~~`Page<T>` serialization~~ — closed. See §7's API hardening pass.
 
 **Testing**
 
 - Mapper/unit tests, CI, and Testcontainers-backed integration tests are all
   in place now — tenant isolation, subscription state transitions, and
   renewal period math are verified against a real Postgres end-to-end, not
-  just unit-tested in isolation (see §7). Remaining gap: no test yet for the
-  check-then-save uniqueness race above, and billing totals aren't testable
-  until Billing is built.
+  just unit-tested in isolation (see §7). `ProblemDetailsAdviceTest` covers
+  the check-then-save race's 409 mapping deterministically (constructing the
+  `DataIntegrityViolationException` directly, rather than racing two real
+  requests). Remaining gap: billing totals aren't testable until Billing is
+  built.
 
 **API completeness**
 
-- No single-resource reads (`GET /api/products/{code}`), no update or delete
-  anywhere. Add `GET /{code}` at minimum — it also unlocks a proper `Location`
-  header on 201 responses, which is currently missing.
+- ~~No single-resource reads~~ — closed. See §7's API hardening pass.
+  `GET /{code}` (Product, Plan) / `GET /{id}` (Customer, Subscription) plus
+  `Location` on 201.
+- Still no update or delete anywhere.
 - No idempotency on create endpoints. Worth at least being able to discuss.
 
 **Smaller**
