@@ -1,0 +1,169 @@
+### Setup — Product for usage tests
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "code": "usage-test-product",
+  "name": "Usage Test Product"
+}
+
+### Setup — Plan (no trial, so the subscription starts ACTIVE)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "productCode": "usage-test-product",
+  "code": "usage-test-plan",
+  "name": "Usage Test Plan",
+  "intervalUnit": "MONTH",
+  "amountCents": 2999,
+  "currency": "USD"
+}
+
+### Setup — Customer, capture id for use below
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "email": "usage-test@acme.test",
+  "name": "Usage Test Customer"
+}
+
+> {%
+    client.global.set("usageCustomerId", response.body.id);
+%}
+
+### Setup — Subscription, capture id for use below
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{usageCustomerId}}",
+  "planCode": "usage-test-plan"
+}
+
+> {%
+    client.global.set("usageSubId", response.body.id);
+%}
+
+
+### Record usage — first call for a meter (expects 200, amount 10)
+POST {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "emails.sent",
+  "amount": 10
+}
+
+### Record usage — second call for the SAME meter (expects 200, amount accumulates to 25)
+POST {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "emails.sent",
+  "amount": 15
+}
+
+### Record usage — a DIFFERENT meter on the same subscription (expects 200, separate counter)
+POST {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "api.calls",
+  "amount": 3.5
+}
+
+### Record usage — zero amount (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "emails.sent",
+  "amount": 0
+}
+
+### Record usage — negative amount (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "emails.sent",
+  "amount": -5
+}
+
+### Record usage — missing meterKey (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "amount": 1
+}
+
+### Record usage — unknown subscription id (expects 404 SUBSCRIPTION_NOT_FOUND)
+POST {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "emails.sent",
+  "amount": 1
+}
+
+### Record usage — tenant isolation: acme's subscription id under demo
+### (expects 404 SUBSCRIPTION_NOT_FOUND — must not leak or succeed)
+POST {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: demo
+
+{
+  "meterKey": "emails.sent",
+  "amount": 1
+}
+
+### List usage for the subscription — expects two counters (emails.sent=25, api.calls=3.5)
+GET {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+X-Tenant-Id: acme
+
+### List usage — tenant isolation check (demo must not see acme's counters)
+GET {{baseUrl}}/api/subscriptions/{{usageSubId}}/usage
+X-Tenant-Id: demo
+
+
+### Setup — a subscription to cancel, to test the CANCELED guard
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "customerId": "{{usageCustomerId}}",
+  "planCode": "usage-test-plan"
+}
+
+> {%
+    client.global.set("usageCanceledSubId", response.body.id);
+%}
+
+### Cancel it
+POST {{baseUrl}}/api/subscriptions/{{usageCanceledSubId}}/cancel
+X-Tenant-Id: acme
+
+### Record usage — against a CANCELED subscription (expects 409 INVALID_SUBSCRIPTION_STATE)
+POST {{baseUrl}}/api/subscriptions/{{usageCanceledSubId}}/usage
+Content-Type: application/json
+X-Tenant-Id: acme
+
+{
+  "meterKey": "emails.sent",
+  "amount": 1
+}
