@@ -123,7 +123,9 @@ on every tenant-owned table.
 `findByTenantIdAndCode(...)`, never `findByCode(...)`. This is no longer the
 *only* thing enforcing isolation — see §9 — but it stays mandatory as defense
 in depth: the structural backstop only covers Hibernate-mediated queries, not
-a future native/`nativeQuery = true` one.
+a native/`nativeQuery = true` one. There's now exactly one of those —
+`UsageCounterJpaRepository.upsertAndIncrement` (see §7) — and `tenantId` is
+bound explicitly in its SQL for exactly this reason.
 
 ---
 
@@ -311,6 +313,43 @@ Seeded tenants for local dev: `acme`, `demo`.
   - `GET /{code}` (Product, Plan) / `GET /{id}` (Customer, Subscription)
     single-resource reads, and 201 responses now carry a real `Location`
     header via `UriComponentsBuilder`.
+- **Usage metering** — `usage/` module, full trio, nested under
+  `/api/subscriptions/{subscriptionId}/usage` the same way `PlanEntitlement`
+  nests under `/api/plans/{planCode}/entitlements`. `period_start`/
+  `period_end` are read off the subscription (`currentPeriodStart`/
+  `currentPeriodEnd`), never accepted from the request — a client can't
+  backdate usage into a period renewal has already rolled past, and that's
+  what makes the `(tenant_id, subscription_id, meter_key, period_start)`
+  unique key meaningful. Recording usage against a `CANCELED` subscription
+  is a 409 `INVALID_SUBSCRIPTION_STATE` (reusing the same exception
+  `cancel`/`pause`/`resume` use); `PAUSED`/`PAST_DUE`/`TRIALING` can still
+  accrue usage.
+  - Recording usage is a running-total increment, not a create — a plain
+    check-then-save read-modify-write would silently lose increments under
+    concurrent requests for the same meter+period, so
+    `UsageCounterJpaRepository.upsertAndIncrement` is a single atomic
+    `INSERT ... ON CONFLICT ON CONSTRAINT uk_usage_counter_tenant_sub_meter_period
+    DO UPDATE SET amount = usage_counter.amount + EXCLUDED.amount ... RETURNING *`.
+    This is the project's **first native/`nativeQuery = true` query** — see
+    the tenancy note in §4: `@TenantId`'s automatic predicate doesn't apply
+    here, so `tenantId` is bound explicitly and is part of the upsert's
+    identity. `UsageMeteringIntegrationTest` includes a 20-thread
+    concurrent-increment test that converges to the exact expected total
+    against a real Postgres, which is the actual justification for the
+    native query over a simpler JPA read-modify-write.
+  - V5 adds `usage_counter.created_at` (missing since V1 — `TenantScoped`
+    requires it) and renames the table's unique constraint, following the
+    same V4 pattern, to a name short enough and stable enough to be the
+    `ON CONFLICT ON CONSTRAINT` target (Postgres had silently truncated the
+    auto-generated name to its 63-character limit).
+  - `BigDecimal` (`usage_counter.amount numeric(20,6)`, for fractional
+    usage) is the first use of that type in the codebase — deliberately
+    the one place `amountCents`-style integer-cents money doesn't apply,
+    since this isn't money yet, just a metered quantity.
+  - No rollover logic needed: because `SubscriptionRenewalService` already
+    sets `currentPeriodStart = oldPeriodEnd` on renewal, a new billing
+    period naturally gets a fresh counter row (`period_start` is part of
+    the unique key) — `RenewalJob` needed no changes.
 
 **Endpoints:**
 ```
@@ -324,16 +363,17 @@ POST GET      /api/customers
 GET            /api/customers/{id}
 POST GET      /api/subscriptions[?customerId=]
 GET            /api/subscriptions/{id}
+POST GET      /api/subscriptions/{subscriptionId}/usage
 ```
 
 ---
 
 ## 8. Roadmap
 
-Subscription state transitions (cancel/pause/resume) and renewal processing
-are done — see §7.
+Subscription state transitions (cancel/pause/resume), renewal processing,
+and usage metering are done — see §7.
 
-Next: Usage metering → Billing/invoice calculation → Invoice PDFs (MinIO) →
+Next: Billing/invoice calculation → Invoice PDFs (MinIO) →
 Mock payments → Dunning (`PAST_DUE`) → Notifications (MailHog) → Audit events →
 JWT + RBAC (`ADMIN`, `BILLING`, `SUPPORT`, `USER`) → Observability
 (Actuator, Micrometer, Prometheus, Grafana).
@@ -356,12 +396,14 @@ feature module does.
   Postgres — a crafted cross-tenant lookup 404s rather than leaking or
   mutating another tenant's row, and the same natural key succeeds under two
   tenants without colliding. It still does **not** protect
-  native/`nativeQuery = true` queries (none exist yet) or anything outside
-  Hibernate entirely (a raw JDBC script, a future reporting tool). Postgres
-  row-level security remains the stronger, DB-level option for those cases —
-  deliberately not done yet; the Testcontainers harness that was the
-  prerequisite for verifying it properly now exists, so RLS is next up if the
-  `SET LOCAL`/HikariCP wiring is worth it.
+  native/`nativeQuery = true` queries — there is now exactly one,
+  `UsageCounterJpaRepository.upsertAndIncrement` (see §7), which binds
+  `tenantId` by hand instead — or anything outside Hibernate entirely (a raw
+  JDBC script, a future reporting tool). Postgres row-level security remains
+  the stronger, DB-level option for those cases — deliberately not done yet;
+  the Testcontainers harness that was the prerequisite for verifying it
+  properly now exists, so RLS is next up if the `SET LOCAL`/HikariCP wiring
+  is worth it.
 - ~~Check-then-save uniqueness race~~ — closed. See §7's API hardening pass.
   `findByTenantIdAndCode(...).ifPresent(throw)` followed by `save(...)` is
   still not atomic, but the losing side of the race now gets the same 409
