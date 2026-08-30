@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.catalog.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanResponse;
 import dev.lumjahaj.subscription.hub.catalog.api.mapper.PlanMapper;
@@ -7,6 +8,7 @@ import dev.lumjahaj.subscription.hub.catalog.app.PlanService;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.common.api.PagedResponse;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
@@ -26,6 +28,7 @@ public class PlanController {
     }
 
     @PostMapping
+    @PreAuthorize(Authorize.CATALOG_WRITE)
     public ResponseEntity<PlanResponse> create(@Valid @RequestBody PlanCreateRequest request) {
         PlanEntity created = planService.create(request);
         URI location = UriComponentsBuilder.fromPath("/api/plans/{code}")

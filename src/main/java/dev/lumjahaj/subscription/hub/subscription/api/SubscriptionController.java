@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.subscription.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionCreateRequest;
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionResponse;
 import dev.lumjahaj.subscription.hub.subscription.api.mapper.SubscriptionMapper;
@@ -7,6 +8,7 @@ import dev.lumjahaj.subscription.hub.subscription.app.SubscriptionService;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
 import dev.lumjahaj.subscription.hub.common.api.PagedResponse;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
@@ -27,6 +29,7 @@ public class SubscriptionController {
     }
 
     @PostMapping
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<SubscriptionResponse> create(@Valid @RequestBody SubscriptionCreateRequest request) {
         SubscriptionEntity created = subscriptionService.create(request);
         URI location = UriComponentsBuilder.fromPath("/api/subscriptions/{id}")
@@ -42,18 +45,21 @@ public class SubscriptionController {
     }
 
     @PostMapping("/{id}/cancel")
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<SubscriptionResponse> cancel(@PathVariable UUID id) {
         SubscriptionEntity canceled = subscriptionService.cancel(id);
         return ResponseEntity.ok(SubscriptionMapper.toResponse(canceled));
     }
 
     @PostMapping("/{id}/pause")
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<SubscriptionResponse> pause(@PathVariable UUID id) {
         SubscriptionEntity paused = subscriptionService.pause(id);
         return ResponseEntity.ok(SubscriptionMapper.toResponse(paused));
     }
 
     @PostMapping("/{id}/resume")
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<SubscriptionResponse> resume(@PathVariable UUID id) {
         SubscriptionEntity resumed = subscriptionService.resume(id);
         return ResponseEntity.ok(SubscriptionMapper.toResponse(resumed));

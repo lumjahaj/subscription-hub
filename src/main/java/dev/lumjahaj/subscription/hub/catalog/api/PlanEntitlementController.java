@@ -1,11 +1,13 @@
 package dev.lumjahaj.subscription.hub.catalog.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanEntitlementCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanEntitlementResponse;
 import dev.lumjahaj.subscription.hub.catalog.api.mapper.PlanEntitlementMapper;
 import dev.lumjahaj.subscription.hub.catalog.app.PlanEntitlementService;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntitlementEntity;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -25,6 +27,7 @@ public class PlanEntitlementController {
     }
 
     @PostMapping
+    @PreAuthorize(Authorize.CATALOG_WRITE)
     public ResponseEntity<PlanEntitlementResponse> create(
             @PathVariable String planCode,
             @Valid @RequestBody PlanEntitlementCreateRequest request

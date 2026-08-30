@@ -1,9 +1,11 @@
 package dev.lumjahaj.subscription.hub.billing.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.billing.api.dto.InvoiceResponse;
 import dev.lumjahaj.subscription.hub.billing.api.mapper.InvoiceMapper;
 import dev.lumjahaj.subscription.hub.billing.app.InvoiceService;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -29,6 +31,7 @@ public class SubscriptionInvoiceController {
     }
 
     @PostMapping
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<InvoiceResponse> generate(@PathVariable UUID subscriptionId) {
         InvoiceEntity created = invoiceService.generateForCurrentPeriod(subscriptionId);
         URI location = UriComponentsBuilder.fromPath("/api/invoices/{id}")

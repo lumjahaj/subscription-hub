@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -82,6 +83,27 @@ public class ProblemDetailsAdvice {
             return UNIQUE_CONSTRAINT_RESOURCE_TYPES.get(cve.getConstraintName());
         }
         return null;
+    }
+
+    /**
+     * @PreAuthorize denials, which arrive here rather than at
+     * SecurityProblemHandler.
+     *
+     * Method security runs as an interceptor around the controller, so its
+     * AccessDeniedException is thrown during dispatch — inside
+     * DispatcherServlet, where @ControllerAdvice gets first refusal. Without
+     * this handler the catch-all below would swallow it and report a
+     * denied request as 500 INTERNAL_ERROR: the endpoint would look broken
+     * rather than forbidden, and the 403 would never reach the
+     * ExceptionTranslationFilter that normally renders it.
+     *
+     * Same status and code SecurityProblemHandler produces for a
+     * URL-level denial, so a client cannot tell which mechanism refused it.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    ProblemDetail handleAccessDenied(AccessDeniedException ex) {
+        return base(HttpStatus.FORBIDDEN, "ACCESS_DENIED",
+                "You do not have permission to perform this action.");
     }
 
     @ExceptionHandler(Exception.class)

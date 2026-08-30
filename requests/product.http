@@ -143,3 +143,41 @@ Authorization: Bearer {{acmeToken}}
 ### Must return demo's own row (name "Messaging API (demo tenant)"), not acme's.
 GET {{baseUrl}}/api/products/messaging
 Authorization: Bearer {{demoToken}}
+
+
+### --- ROLE-BASED ACCESS ---
+### Reads are open to any authenticated role; writes carry an explicit
+### @PreAuthorize. Catalog writes are ADMIN-only, because someone who can
+### run billing should not be able to quietly change what the prices are.
+
+### Auth — log in as the seeded SUPPORT user (read-only role)
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "support@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("supportToken", response.body.token);
+%}
+
+### List Products as SUPPORT (expects 200 — reads need no role)
+GET {{baseUrl}}/api/products
+Authorization: Bearer {{supportToken}}
+
+### Create Product as SUPPORT (expects 403 ACCESS_DENIED)
+### Note this is 403, not 401: the caller is authenticated, just not
+### permitted. And not 500 — @PreAuthorize throws during dispatch, so
+### without an explicit AccessDeniedException handler the catch-all
+### advice would report a forbidden request as an internal error.
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+Authorization: Bearer {{supportToken}}
+
+{
+  "code": "support-denied",
+  "name": "Should Be Denied"
+}

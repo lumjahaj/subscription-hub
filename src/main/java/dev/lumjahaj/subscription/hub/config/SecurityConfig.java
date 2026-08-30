@@ -8,12 +8,20 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.web.servlet.HandlerExceptionResolver;
 
 @Configuration
+// Enables @PreAuthorize. The rules live next to the methods they guard
+// (see Authorize) rather than as a wall of URL patterns here: a path
+// pattern and the handler it protects drift apart silently, an annotation
+// on the method cannot.
+@EnableMethodSecurity
 public class SecurityConfig {
 
     private final TenantRepository tenants;
@@ -53,7 +61,7 @@ public class SecurityConfig {
                         // depth against a future exposure change.
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth -> oauth
-                        .jwt(jwt -> {})
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter()))
                         .authenticationEntryPoint(problemHandler))
                 .exceptionHandling(handling -> handling
                         .authenticationEntryPoint(problemHandler)
@@ -72,6 +80,29 @@ public class SecurityConfig {
                 .addFilterAfter(tenantResolverFilter(), AuthorizationFilter.class);
 
         return http.build();
+    }
+
+    /**
+     * Teaches the resource server where this application's roles live.
+     *
+     * Spring's default converter reads the OAuth2 `scope`/`scp` claims and
+     * produces `SCOPE_`-prefixed authorities. AuthService issues a `roles`
+     * claim instead, because these are application roles rather than
+     * delegated OAuth scopes — so without this, every token would arrive
+     * with no authorities at all and every @PreAuthorize would deny,
+     * silently and uniformly.
+     *
+     * The `ROLE_` prefix is what lets hasRole('ADMIN') match: hasRole
+     * prepends it, hasAuthority does not.
+     */
+    private JwtAuthenticationConverter jwtAuthenticationConverter() {
+        JwtGrantedAuthoritiesConverter authorities = new JwtGrantedAuthoritiesConverter();
+        authorities.setAuthoritiesClaimName("roles");
+        authorities.setAuthorityPrefix("ROLE_");
+
+        JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+        converter.setJwtGrantedAuthoritiesConverter(authorities);
+        return converter;
     }
 
     /**

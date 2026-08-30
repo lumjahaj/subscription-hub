@@ -1,11 +1,13 @@
 package dev.lumjahaj.subscription.hub.usage.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.usage.api.dto.UsageCounterResponse;
 import dev.lumjahaj.subscription.hub.usage.api.dto.UsageRecordRequest;
 import dev.lumjahaj.subscription.hub.usage.api.mapper.UsageCounterMapper;
 import dev.lumjahaj.subscription.hub.usage.app.UsageService;
 import dev.lumjahaj.subscription.hub.usage.infra.jpa.UsageCounterEntity;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -28,6 +30,7 @@ public class UsageController {
     // meter+period creates the counter row, every later call for the same
     // one just adds to it, and the response is the same either way.
     @PostMapping
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<UsageCounterResponse> record(
             @PathVariable UUID subscriptionId,
             @Valid @RequestBody UsageRecordRequest request

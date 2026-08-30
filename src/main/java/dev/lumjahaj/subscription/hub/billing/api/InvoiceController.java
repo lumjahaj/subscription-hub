@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.billing.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.billing.api.dto.InvoiceResponse;
 import dev.lumjahaj.subscription.hub.billing.api.mapper.InvoiceMapper;
 import dev.lumjahaj.subscription.hub.billing.app.InvoicePdfDownload;
@@ -7,6 +8,7 @@ import dev.lumjahaj.subscription.hub.billing.app.InvoicePdfService;
 import dev.lumjahaj.subscription.hub.billing.app.InvoiceService;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
 import dev.lumjahaj.subscription.hub.common.api.PagedResponse;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
 import org.springframework.data.domain.Page;
@@ -57,6 +59,7 @@ public class InvoiceController {
     // 201 rather than 200 because this creates a document that did not
     // exist before, and Location points at where it can now be fetched.
     @PostMapping("/{id}/pdf")
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<InvoiceResponse> generatePdf(@PathVariable UUID id) {
         InvoiceEntity invoice = invoicePdfService.generatePdf(id);
         URI location = UriComponentsBuilder.fromPath("/api/invoices/{id}/pdf")

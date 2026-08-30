@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.customer.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerCreateRequest;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerResponse;
 import dev.lumjahaj.subscription.hub.customer.api.mapper.CustomerMapper;
@@ -7,6 +8,7 @@ import dev.lumjahaj.subscription.hub.customer.app.CustomerService;
 import dev.lumjahaj.subscription.hub.customer.infra.jpa.CustomerEntity;
 import dev.lumjahaj.subscription.hub.common.api.PagedResponse;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
@@ -27,6 +29,7 @@ public class CustomerController {
     }
 
     @PostMapping
+    @PreAuthorize(Authorize.COMMERCIAL)
     public ResponseEntity<CustomerResponse> create(@Valid @RequestBody CustomerCreateRequest request) {
         CustomerEntity created = customerService.create(request);
         URI location = UriComponentsBuilder.fromPath("/api/customers/{id}")

@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.catalog.api;
 
+import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductResponse;
 import dev.lumjahaj.subscription.hub.catalog.api.mapper.ProductMapper;
@@ -7,6 +8,7 @@ import dev.lumjahaj.subscription.hub.catalog.app.ProductService;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.ProductEntity;
 import dev.lumjahaj.subscription.hub.common.api.PagedResponse;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
@@ -26,6 +28,7 @@ public class ProductController {
     }
 
     @PostMapping
+    @PreAuthorize(Authorize.CATALOG_WRITE)
     public ResponseEntity<ProductResponse> create(@Valid @RequestBody ProductCreateRequest request) {
         ProductEntity created = productService.create(request);
         URI location = UriComponentsBuilder.fromPath("/api/products/{code}")
