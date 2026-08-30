@@ -74,6 +74,12 @@ public class TenantResolverFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         return path.startsWith("/actuator")
                 || path.startsWith("/swagger-ui")
-                || path.startsWith("/v3/api-docs");
+                || path.startsWith("/v3/api-docs")
+                // Login cannot require a resolved tenant: establishing which
+                // tenant the caller belongs to is precisely what it does, and
+                // it takes the tenant in its body rather than a header. Without
+                // this the filter rejects every login with TENANT_MISSING
+                // before the controller is ever reached.
+                || path.startsWith("/api/auth");
     }
 }

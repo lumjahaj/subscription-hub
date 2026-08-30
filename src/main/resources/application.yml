@@ -24,6 +24,13 @@ spring:
 server:
   port: 8080
 
+auth:
+  jwt:
+    # HS256 requires at least 32 bytes; JwtConfig fails at startup below that
+    # rather than at the first login attempt.
+    secret: ${JWT_SECRET}
+    ttl: 1h
+
 billing:
   cycle:
     cron: "0 0 * * * *"   # hourly, on the hour - invoices then renews each due subscription

@@ -46,7 +46,14 @@ import org.testcontainers.containers.PostgreSQLContainer;
  *   from MINIO_ROOT_USER/PASSWORD env vars that don't exist in a test JVM.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@TestPropertySource(properties = "billing.cycle.cron=-")
+@TestPropertySource(properties = {
+        "billing.cycle.cron=-",
+        // JwtConfig resolves this eagerly and rejects anything under 32
+        // bytes, so without it every context fails to build - the same
+        // trap billing.pdf.* hit. A fixed test secret also keeps tokens
+        // reproducible across a run.
+        "auth.jwt.secret=test-only-jwt-secret-at-least-32-bytes-long"
+})
 public abstract class AbstractIntegrationTest {
 
     @ServiceConnection
