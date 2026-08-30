@@ -11,6 +11,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
@@ -56,6 +57,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   from MINIO_ROOT_USER/PASSWORD env vars that don't exist in a test JVM.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+// The seeded logins these tests authenticate as live in db/seed, which is
+// only on the Flyway path under this profile. On the shared base, never a
+// subclass: a differing profile set is a different context-cache key.
+@ActiveProfiles("dev")
 @TestPropertySource(properties = {
         "billing.cycle.cron=-",
         // JwtConfig resolves this eagerly and rejects anything under 32
@@ -66,7 +71,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 public abstract class AbstractIntegrationTest {
 
-    /** Matches the bcrypt hash seeded by Flyway V8 for both tenants' admins. */
+    /** Matches the bcrypt hash in db/seed/V9001__seed_dev_users.sql. */
     private static final String SEEDED_PASSWORD = "subscriptionhub";
 
     @ServiceConnection

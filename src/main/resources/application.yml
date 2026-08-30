@@ -13,8 +13,17 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
   flyway:
     enabled: true
+    # Schema only. Seed data lives in db/seed and is added to this list by
+    # the dev profile below - migrations run in every environment, so
+    # anything with a public password must not be reachable from here.
     locations: classpath:db/migration
     baseline-on-migrate: true
+    # A database seeded under the dev profile records db/seed's migrations
+    # in flyway_schema_history. Starting the same database without the
+    # profile then leaves history entries with no corresponding file, which
+    # validate treats as an error. This makes that non-fatal, so a dev
+    # database can be started either way.
+    ignore-migration-patterns: "*:missing"
   devtools:
     restart:
       enabled: false
@@ -67,3 +76,18 @@ logging:
   level:
     root: INFO
     org.springframework: INFO
+
+---
+# Development profile. Deliberately NOT the default: an environment that
+# forgets to set a profile gets no seeded logins, rather than silently
+# inheriting an admin account whose password is in the repository. Safety
+# over convenience, since the failure mode of the reverse is invisible.
+#
+# Local: ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+# Tests: AbstractIntegrationTest activates it via @ActiveProfiles.
+spring:
+  config:
+    activate:
+      on-profile: dev
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed
