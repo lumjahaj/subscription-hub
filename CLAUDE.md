@@ -47,7 +47,14 @@ Thymeleaf is present as a **library only** (`org.thymeleaf:thymeleaf`), never
 turns into a PDF. This is a pure JSON API with no MVC view layer, and the starter
 would wire one in.
 
-Planned: JWT, Redis, MailHog/Mailpit, WireMock, Micrometer, Prometheus, Grafana.
+Authentication is **self-issued HS256 JWTs**, validated by
+`spring-boot-starter-oauth2-resource-server` (which had been on the classpath
+unused since the beginning). Symmetric signing because issuer and validator are the
+same process; an external IdP would use RSA + JWKS and change only `issuer-uri`,
+since the verification side is already the standard machinery — the same
+"code against the standard, keep the provider a config value" shape as MinIO/S3.
+
+Planned: Redis, MailHog/Mailpit, WireMock, Micrometer, Prometheus, Grafana.
 
 Everything must stay **free and locally runnable**.
 
@@ -64,6 +71,7 @@ Feature-based modules, each with the same internal layering:
 
 ```
 common/          api, logging, web — cross-cutting, depends on nothing
+auth/            api, app, domain, infra/jpa
 tenancy/         api, domain, infra
 catalog/         api, app, domain, infra/jpa
 customer/        api, app, domain, infra/jpa
@@ -123,15 +131,35 @@ symmetry.
 Single database, single schema, **row-level isolation** via a `tenant_id` column
 on every tenant-owned table.
 
-- Tenant resolved from the `X-Tenant-Id` header (a human-readable slug like
-  `acme`, **not** a UUID — that's why `tenantId` is `String` everywhere).
-- `TenantResolverFilter` (`OncePerRequestFilter`, `HIGHEST_PRECEDENCE`) validates
-  the header, loads the tenant, and populates `TenantContext` (static ThreadLocal)
-  plus MDC. Cleans up in `finally`.
-- Filter skips `/actuator`, `/swagger-ui`, `/v3/api-docs`.
-- Exceptions: `MissingTenantException` → 400 `TENANT_MISSING`,
-  `UnknownTenantException` → 401 `TENANT_UNKNOWN`.
+- Tenant comes from the **`tenant_id` claim of a verified JWT** (a human-readable
+  slug like `acme`, **not** a UUID — that's why `tenantId` is `String` everywhere).
+  It was an `X-Tenant-Id` header until authentication landed; that header is gone,
+  because a tenant the caller types is a tenant the caller chooses.
+- `TenantResolverFilter` reads the claim off `SecurityContextHolder`, re-checks the
+  tenant is active, and populates `TenantContext` (static ThreadLocal) plus MDC.
+  Cleans up in `finally`.
+- **It runs inside the security chain, registered
+  `addFilterAfter(..., AuthorizationFilter.class)`** — not at `HIGHEST_PRECEDENCE`
+  as it once did. It has to see an authenticated principal, and it must run after
+  authorization: `BearerTokenAuthenticationFilter` only authenticates *when a token
+  is present*, so placing it between the two meant unauthenticated requests were
+  rejected as 400 `TENANT_MISSING` before Security could answer 401.
+- It is **not a `@Component`**, and that is load-bearing: Boot auto-registers every
+  `Filter` bean into the servlet chain, so a bean would also run early, outside
+  security, with no principal. `SecurityConfig` constructs it directly.
+- Filter skips what `SecurityConfig` permits: `/api/auth`, `/api/health`,
+  `/actuator`, `/swagger-ui`, `/v3/api-docs`. Being inside the security chain is
+  not the same as running only on authenticated requests — a `permitAll` path still
+  passes through every filter, just with an empty context.
+- Exceptions: `MissingTenantException` → 400 `TENANT_MISSING` now means *a valid
+  token carrying no `tenant_id`*, i.e. one minted by something other than
+  `AuthService`; `UnknownTenantException` → 401 `TENANT_UNKNOWN` means the tenant
+  was deactivated after the token was issued.
 - App services read the tenant via `TenantContext.getTenantId()` directly.
+- `RequestIdFilter` (`common/web`) keeps the MDC request id and stays at
+  `HIGHEST_PRECEDENCE`, outside the security chain — tenant resolution now happens
+  late, but a request Security rejects never reaches it, and those responses still
+  need a correlation id.
 
 **Every repository query must still be tenant-scoped explicitly.**
 `findByTenantIdAndCode(...)`, never `findByCode(...)`. This is no longer the
@@ -141,6 +169,16 @@ a native/`nativeQuery = true` one. There are now two of those —
 `UsageCounterJpaRepository.upsertAndIncrement` and
 `InvoiceJpaRepository.allocateNextNumber` (see §7) — and `tenantId` is bound
 explicitly in both for exactly this reason.
+
+**`AppUserEntity` is the one tenant-owned entity that does not extend
+`TenantScoped`**, so it gets no `@TenantId` predicate. This is a chicken-and-egg,
+not an oversight: `@TenantId` resolves from `TenantContext` when the Hibernate
+session opens, and with `spring.jpa.open-in-view` that is the *start of the
+request* — before anything could know the tenant. Reading this table is what
+establishes it. Extending `TenantScoped` produced a self-contradicting
+`where tenant_id = '__no_tenant__' and tenant_id = 'acme'` and failed every login
+with correct credentials. Scoping stays explicit via `findByTenantIdAndEmail`, and
+the issued token takes its tenant from the row found rather than from the request.
 
 ---
 
@@ -227,8 +265,42 @@ three commits:
   surfaces as a confusing Jackson error (ProblemDetail's numeric `status` vs.
   an enum field) hundreds of log lines from the real cause.
 
+**Servlet filters + Spring Security** — this has bitten three times in one
+commit:
+- Spring Boot **auto-registers every `Filter` bean** into the servlet chain. A
+  filter that is both a bean and added to the security chain runs *twice* — once
+  early, outside security, with no principal. Construct it directly in
+  `SecurityConfig` (or disable the automatic registration with a
+  `FilterRegistrationBean.setEnabled(false)`).
+- **`addFilterAfter(BearerTokenAuthenticationFilter.class)` is not "after
+  authentication".** That filter only authenticates *when a token is present*;
+  enforcing `authenticated()` happens later, in `AuthorizationFilter`. A filter
+  between the two sees unauthenticated requests and can reject them with the wrong
+  status before Security answers 401. Use `AuthorizationFilter.class`.
+- **Being in the security chain ≠ running only on authenticated requests.** A
+  `permitAll` path still passes through every filter, just with an empty
+  `SecurityContext`. Keep `shouldNotFilter` in step with the `permitAll` matchers,
+  or login rejects itself.
+
+**Security errors must stay problem+json.** Spring Security rejects inside the
+filter chain, before dispatch, so `ProblemDetailsAdvice` never sees those — the
+defaults are an empty 401 body and an HTML 403 page. `SecurityProblemHandler`
+renders both as problem+json with `code` and `requestId`. Conversely
+`@PreAuthorize` throws `AccessDeniedException` *during* dispatch, where
+`@ControllerAdvice` gets first refusal — so `ProblemDetailsAdvice` needs an
+explicit handler for it, or the catch-all `@ExceptionHandler(Exception.class)`
+reports a forbidden request as 500 and the endpoint looks broken rather than
+protected.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
+
+**Schema and seed data are separate locations.** `db/migration` is schema and runs
+everywhere; `db/seed` holds development fixtures and is only on the Flyway path
+under the `dev` profile, which is deliberately *not* the default. Migrations have
+no notion of environment, so anything carrying a credential must never live in
+`db/migration` — a comment saying "dev only" documents the risk without preventing
+it. Seeds are numbered `V9000+` so they can never interleave with a schema version.
 
 **Commits** — conventional commits, split by concern, not by chronology.
 Structural refactor, new feature, bug fix, and test tooling are separate commits.
@@ -248,6 +320,8 @@ happy path, validation failures, conflict/not-found, and **tenant isolation**
 
 ```
 tenant (id varchar(64) PK — slug)
+ ├── app_user            (unique tenant_id + email; bcrypt password_hash)
+ │    └── app_user_role  (user_id + role; CHECK against the four Role values)
  ├── customer            (unique tenant_id + email)
  ├── product             (unique tenant_id + code)
  │    └── plan           (unique tenant_id + code; interval_unit, interval_count, amount_cents, currency, trial_days)
@@ -508,9 +582,45 @@ Seeded tenants for local dev: `acme`, `demo`.
     internal storage layout and is tenant-prefixed, so exposing it would leak
     both where bytes live and the tenant id that never appears in a body.
 
+- **Authentication & RBAC** — `auth/` module. Callers obtain a token from
+  `POST /api/auth/token` (tenantId + email + password) and send it as
+  `Authorization: Bearer`. **The tenant comes from the token's signed `tenant_id`
+  claim; the `X-Tenant-Id` header is gone.** Before this, tenant isolation rested
+  on a string the caller typed — `@TenantId` and the isolation tests protected
+  tenant A from tenant B's *bugs*, but nothing stopped B from simply claiming to
+  be A.
+  - HS256, secret from `JWT_SECRET`, ≥32 bytes enforced at startup rather than at
+    first login. `JwtConfig` also validates the issuer, so a token signed with the
+    same secret by another service can't be replayed.
+  - Every login failure — unknown tenant, unknown email, disabled account, wrong
+    password — returns one code, and the password hash is computed even when no
+    user was found, so neither the message nor the response time reveals which
+    tenants and emails exist.
+  - **Roles** live in the `roles` claim and are mapped to `ROLE_`-prefixed
+    authorities by a custom `JwtAuthenticationConverter` — Spring's default reads
+    the OAuth2 `scope`/`scp` claims, so without it every token arrives with no
+    authorities and every rule denies uniformly, which looks identical to the
+    rules simply being strict.
+  - **Reads are open to any authenticated role; writes carry an explicit
+    `@PreAuthorize`** (see `auth/api/Authorize`). Catalog writes are `ADMIN` only —
+    deliberately narrower than commercial operations, since someone who can run
+    billing shouldn't be able to change what the prices are. Customers,
+    subscriptions, usage and invoices accept `ADMIN` or `BILLING`. The convention:
+    an unannotated write is a bug, an unannotated read is deliberate.
+  - `AppUserEntity` deliberately does not extend `TenantScoped` — see §4 for the
+    chicken-and-egg that forces it.
+  - Actuator: only `health` and `info` are exposed, and only `/actuator/health` is
+    public. `httptrace` was removed from the exposure list — a Boot 2 endpoint id
+    needing a bean nothing defines, so already dead, but it records request and
+    response *headers*, which now means bearer tokens.
+  - Seeded dev logins (`admin@acme.test`, `admin@demo.test`, `support@acme.test`,
+    password `subscriptionhub`) live in `db/seed` under the `dev` profile, not in
+    `db/migration` — see §5.
+
 **Endpoints:**
 ```
-GET  /api/health
+POST          /api/auth/token          (public)
+GET  /api/health                       (public)
 POST GET      /api/products
 GET            /api/products/{code}
 POST GET      /api/plans
@@ -532,13 +642,25 @@ POST GET      /api/invoices/{id}/pdf
 ## 8. Roadmap
 
 Subscription state transitions (cancel/pause/resume), renewal processing,
-usage metering, billing/invoice calculation, and invoice PDFs (MinIO) are
-done — see §7.
+usage metering, billing/invoice calculation, invoice PDFs (MinIO), and
+JWT authentication + RBAC are done — see §7.
 
 Next: Mock payments → Dunning (`PAST_DUE`) → Notifications (MailHog — the PDF
-is the attachment, which is why it came first) → Audit events →
-JWT + RBAC (`ADMIN`, `BILLING`, `SUPPORT`, `USER`) → Observability
+is the attachment, which is why it came first) →
+**Tenant provisioning (platform-admin API)** → Audit events → Observability
 (Actuator, Micrometer, Prometheus, Grafana).
+
+Two notes on that order:
+
+- **Audit events moved after authentication**, and had to. `audit_event` has an
+  `actor` column and the whole point of an audit log is recording *who* did
+  something; building it before there was an authenticated principal would have
+  meant writing `actor = null` and then rebuilding it.
+- **Tenant provisioning is `POST /api/platform/tenants` behind a principal with
+  *no* `tenant_id` claim.** It earns its own roadmap line because it introduces
+  the platform-level principal that two other gaps already need — actuator
+  authorization beyond `/health`, and the fact that there is currently no way to
+  create a tenant at all (see §9).
 
 ---
 
@@ -548,6 +670,15 @@ Honest assessment. Several of these matter more for the portfolio than the next
 feature module does.
 
 **Architectural**
+
+- **Tenant isolation now rests on a signed claim, not the caller's word.** Until
+  authentication landed, `X-Tenant-Id` was client-supplied and unverified: anyone
+  who could reach the API was any tenant they liked. `@TenantId` and
+  `TenantIsolationIntegrationTest` protected tenant A from tenant B's *bugs*, never
+  from B claiming to be A. That is closed — but note `AppUserEntity` is now an
+  entity with no `@TenantId` predicate at all (§4), so its single repository method
+  is the *only* thing scoping it. A second query added there without
+  `tenantId` would not be caught by the backstop.
 
 - **Tenant isolation has a structural backstop, now verified but not fully
   closed.** Hibernate `@TenantId` (not `@Filter` — that's opt-in per `Session`
@@ -587,6 +718,17 @@ feature module does.
   prove the usage-counter-to-invoice join and the invoice-before-renew
   ordering against a real Postgres, including a 10-thread concurrent
   generation test mirroring usage metering's concurrency proof.
+- **The auth tests assert the negative on purpose.** After authentication landed,
+  every integration test authenticates for real, so the suite passing shows tokens
+  *work* — it would look identical if security were switched off entirely.
+  `AuthenticationIntegrationTest` therefore checks that no token, a garbage token
+  and another tenant's token are all rejected, and `AuthorizationIntegrationTest`
+  uses the seeded `SUPPORT` user to check a lesser role is genuinely refused —
+  in both directions, so a globally broken role mapping (which would deny
+  everyone) fails too.
+- Remaining gap: nothing tests an **expired** token. The TTL is an hour, so it
+  would need either clock manipulation or a separately minted short-lived token;
+  the tampered-token case covers signature rejection but not expiry.
 
 **API completeness**
 
@@ -607,7 +749,9 @@ feature module does.
   its own, implicitly inheriting the parent plan's; that's the one place a
   mismatch could hide today, invisible because the two are always read
   together.
-- `audit_event` table exists but nothing writes to it.
+- `audit_event` table exists but nothing writes to it. No longer *blocked*,
+  though: it needed an authenticated principal to record in its `actor` column,
+  and there now is one — which is why §8 moved it after authentication.
 - Only `InvoiceStatus.OPEN` is ever set — `DRAFT`, `PAID`, `VOID`, and
   `UNCOLLECTIBLE` are declared (they must match the Postgres enum exactly)
   but nothing in the code produces them yet. Deliberate: better an
@@ -643,6 +787,51 @@ feature module does.
   dependencies, but there is **no test for the storage failure path** — e.g.
   that `BillingCycleJob` really does continue when MinIO is unreachable. That
   behaviour is asserted only by reading the code.
+
+**Authentication and authorization**
+
+- **No refresh tokens, no logout, no revocation.** A token is valid until it
+  expires (1h); a stolen one cannot be recalled. Real systems pair a short access
+  token with a refresh token and a revocation list, which needs server-side state
+  this deliberately doesn't have.
+- **No password reset, no password change, no user management at all.** Users only
+  exist because `db/seed` creates them. There is no endpoint to create one, so the
+  `uk_app_user_tenant_email` constraint is unreachable through the API and is
+  deliberately *not* registered in `ProblemDetailsAdvice`'s constraint map — adding
+  it would be dead code until a user-management endpoint exists.
+- **No rate limiting on login.** The endpoint is public and does a bcrypt
+  verification per call, so it is both brute-forceable and a cheap way to burn CPU.
+  The constant-time-ish behaviour (always hashing, one error code) stops
+  enumeration, not volume.
+- **The signing secret is symmetric and shared.** Anything holding it can mint
+  tokens, so it is exactly as sensitive as the database password. An external IdP
+  with RSA + JWKS removes that, and the resource-server side is already ready for
+  it.
+- **`USER` is declared but not meaningfully distinct from `SUPPORT`.** Both are
+  read-only. It only becomes different once an `app_user` can be linked to a
+  `customer` — "read *your own* subscriptions" — and no schema exists for that
+  link. Declared because §8 named it, not because it does anything.
+- **No platform-level (cross-tenant) principal.** Every token is bound to a
+  tenant, so "who may read `/actuator/metrics`?" has no clean answer — any tenant's
+  ADMIN would technically qualify. Non-health actuator endpoints stay unexposed to
+  avoid the question; Observability will force it, since Prometheus has to scrape
+  `/actuator/prometheus`.
+- **No way to create a tenant.** `TenantRepository` has only `findActiveById` and
+  `findAllActive` — no `save`, no controller, no CLI. A tenant exists only because
+  `db/seed` or manual SQL made it. Four options were weighed: self-service signup,
+  a platform-admin API, out-of-band tooling, and a payment-provider webhook. A B2B
+  billing backend points at the platform-admin API, since customers here are
+  onboarded through a sales process rather than a signup form (§8).
+- **The seeded `acme`/`demo` tenants still ship in `V1`, in every environment.**
+  The seeded *logins* were moved to a profile-gated `db/seed` because their
+  password is public; the tenants stayed, for two reasons. They carry no
+  credentials, and deleting them would be worse than leaving them: all twelve
+  tables referencing `tenant` cascade, so dropping `acme` would take every
+  customer, product, subscription and invoice with it — and with no provisioning
+  API, a deployment stripped of them would have no tenants and no way to get one.
+- **Swagger UI and `/v3/api-docs` are public.** Convenient locally, and it exposes
+  the full API shape to anyone who can reach the service. Fine for a portfolio, not
+  for a real deployment.
 
 ---
 

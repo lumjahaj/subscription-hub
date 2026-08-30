@@ -15,8 +15,10 @@ walk through in a Senior Java/Spring Boot interview.
 Subscription Hub models the backend of a billing system that serves multiple
 tenants (SaaS customers) from one deployment:
 
-- **Tenants** are resolved per-request from an `X-Tenant-Id` header and every
+- **Tenants** are resolved per-request from a verified JWT claim, and every
   tenant-owned row is isolated by a `tenant_id` column.
+- **Authentication** issues signed tokens carrying the caller's tenant and roles,
+  with role-based rules on every write endpoint.
 - **Catalog** — tenants define `Product`s, each with one or more `Plan`s
   (interval, price in cents, currency, trial length), and optional
   `PlanEntitlement`s (feature flags/limits attached to a plan).
@@ -33,9 +35,9 @@ tenants (SaaS customers) from one deployment:
 - **Invoice PDFs** are rendered from an HTML template and stored in MinIO
   (S3-compatible object storage), then streamed back through the API.
 
-Mock payments, dunning, notifications, audit logging, and JWT/RBAC auth are on
-the roadmap but not yet built — see [`CLAUDE.md`](CLAUDE.md) for the detailed
-current state and what's next.
+Mock payments, dunning, notifications, tenant provisioning and audit logging are
+on the roadmap but not yet built — see [`CLAUDE.md`](CLAUDE.md) for the detailed
+current state, and for an honest list of what's deliberately missing.
 
 ---
 
@@ -46,6 +48,7 @@ same way:
 
 ```
 common/          cross-cutting: error handling, logging, OpenAPI config
+auth/            users, roles, JWT issuing
 tenancy/         tenant resolution, TenantContext, tenant domain model
 catalog/         Product, Plan, PlanEntitlement
 customer/        Customer
@@ -75,15 +78,22 @@ Spring Data's query-naming machinery out of the domain contract.
 Single database, single schema, row-level isolation via a `tenant_id` column
 on every tenant-owned table:
 
-1. Every request must include `X-Tenant-Id: <tenant-slug>` (e.g. `acme`).
-2. `TenantResolverFilter` validates the header, loads the tenant, and
-   populates a request-scoped `TenantContext`.
+1. Every request carries `Authorization: Bearer <jwt>`, obtained from
+   `POST /api/auth/token`.
+2. `TenantResolverFilter` reads the token's signed `tenant_id` claim, re-checks
+   the tenant is still active, and populates a request-scoped `TenantContext`.
 3. Application services read the current tenant from `TenantContext` and
    every repository query is scoped by it — never by a tenant ID taken from
    the request body.
 
-A missing header returns `400 TENANT_MISSING`; an unknown tenant returns
-`401 TENANT_UNKNOWN`.
+There is deliberately **no `X-Tenant-Id` header**. It existed until
+authentication landed, and it meant the tenant was whatever the caller typed:
+row-level isolation protected each tenant from the others' *bugs*, but nothing
+stopped someone from simply claiming to be another tenant. Taking it from a
+signed claim is what closes that.
+
+No token returns `401 UNAUTHENTICATED`; an authenticated caller lacking the
+required role returns `403 ACCESS_DENIED`.
 
 ### Error handling
 
@@ -147,29 +157,56 @@ The Spring Boot app itself is **not** part of `docker-compose.yml`; run it
 directly against the containerized Postgres:
 
 ```bash
-./mvnw spring-boot:run
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
 ```
 
-Or run `SubscriptionHubApplication` from your IDE. It starts on
-**http://localhost:8080**.
+Or run `SubscriptionHubApplication` from your IDE with the `dev` profile
+active. It starts on **http://localhost:8080**.
+
+The `dev` profile is what puts `db/seed` on the Flyway path, and therefore what
+creates the login accounts below. It is deliberately not the default: seed data
+carries a publicly known password, so an environment that forgets to ask for it
+gets none rather than silently inheriting an admin account.
 
 ### 3. Explore the API
 
 Swagger UI: **http://localhost:8080/swagger-ui/index.html**
 OpenAPI JSON: `http://localhost:8080/v3/api-docs`
 
-Every request against a tenant-owned endpoint needs the tenant header, e.g.:
+Every request against a tenant-owned endpoint needs a bearer token. Get one
+first:
+
+```bash
+curl -s -X POST http://localhost:8080/api/auth/token \
+  -H 'Content-Type: application/json' \
+  -d '{"tenantId":"acme","email":"admin@acme.test","password":"subscriptionhub"}'
+```
+
+then send it:
 
 ```
 GET /api/products
-X-Tenant-Id: acme
+Authorization: Bearer <token>
 ```
 
-Two tenants are seeded by the baseline migration for local testing: `acme`
-and `demo`.
+In Swagger UI, use the **Authorize** button and paste the token.
+
+Two tenants are seeded for local testing (`acme` and `demo`), each with an
+admin, plus one read-only user for trying the role rules:
+
+| Tenant | Email               | Role    | Password         |
+|--------|---------------------|---------|------------------|
+| acme   | `admin@acme.test`   | ADMIN   | `subscriptionhub` |
+| demo   | `admin@demo.test`   | ADMIN   | `subscriptionhub` |
+| acme   | `support@acme.test` | SUPPORT | `subscriptionhub` |
+
+These exist only under the `dev` profile. Reads are open to any authenticated
+role; writes need `ADMIN` (catalog) or `ADMIN`/`BILLING` (customers,
+subscriptions, usage, invoices) — logging in as `support@acme.test` is the
+quickest way to see a `403`.
 
 Example request files covering happy paths, validation errors,
-conflict/not-found, and tenant-isolation checks live in
+conflict/not-found, role denials, and tenant-isolation checks live in
 [`requests/`](requests/) (IntelliJ HTTP Client format).
 
 ---
