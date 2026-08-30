@@ -1,7 +1,41 @@
+### Auth — log in as acme's seeded admin and capture the token.
+### Every request below sends it as a bearer token. There is no
+### X-Tenant-Id header any more: the tenant comes from the token's
+### signed tenant_id claim, so a client can no longer choose it.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth — a second tenant, used only for the isolation checks below.
+### Swapping a header used to be enough to act as another tenant; now it
+### takes that tenant's own token, which makes those checks meaningful.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+
 ### Create Product — happy path
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "code": "messaging",
@@ -12,7 +46,7 @@ X-Tenant-Id: acme
 ### Create Product — no description (optional field)
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "code": "analytics",
@@ -22,7 +56,7 @@ X-Tenant-Id: acme
 ### Create Product — duplicate code, same tenant (expects 409 PRODUCT_ALREADY_EXISTS)
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "code": "messaging",
@@ -33,7 +67,7 @@ X-Tenant-Id: acme
 ### Create Product — same code, different tenant (expects 201 — tenant isolation check)
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 {
   "code": "messaging",
@@ -44,7 +78,7 @@ X-Tenant-Id: demo
 ### Create Product — missing code (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "name": "No Code Product"
@@ -53,26 +87,28 @@ X-Tenant-Id: acme
 ### Create Product — blank name (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "code": "no-name",
   "name": ""
 }
 
-### Create Product — missing X-Tenant-Id header (expects 400 TENANT_MISSING)
+### Create Product — no token (expects 401 UNAUTHENTICATED)
 POST {{baseUrl}}/api/products
 Content-Type: application/json
 
 {
-  "code": "no-tenant",
-  "name": "No Tenant Product"
+  "code": "no-token",
+  "name": "No Token Product"
 }
 
-### Create Product — unknown tenant (expects 401 TENANT_UNKNOWN)
+### Create Product — a token that isn't one (expects 401)
+# The old "unknown tenant" case is gone: a caller can no longer name a
+# tenant at all, only present a token that proves which one they belong to.
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: does-not-exist
+Authorization: Bearer not.a.real.token
 
 {
   "code": "ghost",
@@ -81,29 +117,29 @@ X-Tenant-Id: does-not-exist
 
 ### List Products — default paging
 GET {{baseUrl}}/api/products
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Products — explicit page/size
 GET {{baseUrl}}/api/products?page=0&size=5
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Products — sorted by name
 GET {{baseUrl}}/api/products?sort=name,asc
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Products — tenant isolation check (demo tenant should NOT see acme's products)
 GET {{baseUrl}}/api/products
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### Get Product — by code
 GET {{baseUrl}}/api/products/messaging
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Product — unknown code (expects 404 PRODUCT_NOT_FOUND)
 GET {{baseUrl}}/api/products/does-not-exist
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Product — tenant isolation: demo also has a "messaging" product (created above).
 ### Must return demo's own row (name "Messaging API (demo tenant)"), not acme's.
 GET {{baseUrl}}/api/products/messaging
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}

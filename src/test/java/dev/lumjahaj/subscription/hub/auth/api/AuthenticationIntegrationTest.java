@@ -2,17 +2,21 @@ package dev.lumjahaj.subscription.hub.auth.api;
 
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenRequest;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenResponse;
+import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductCreateRequest;
 import dev.lumjahaj.subscription.hub.testsupport.AbstractIntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 
 import java.time.Instant;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -134,6 +138,86 @@ class AuthenticationIntegrationTest extends AbstractIntegrationTest {
         org.assertj.core.api.Assertions
                 .assertThatThrownBy(() -> jwtDecoder.decode(tampered))
                 .isInstanceOf(Exception.class);
+    }
+
+    // --- enforcement -------------------------------------------------
+    // The suite passing after authentication landed proves tokens work.
+    // These prove the opposite direction: that requests without a valid
+    // one are genuinely rejected, and that the whole suite isn't quietly
+    // passing because security is off.
+
+    @Test
+    void aProtectedEndpoint_withoutAToken_isUnauthorized() {
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/products", HttpMethod.GET, HttpEntity.EMPTY, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        // Spring Security rejects inside the filter chain, before any
+        // controller, so this body only exists because SecurityProblemHandler
+        // renders it - the default would be an empty 401.
+        assertThat(response.getBody()).contains("UNAUTHENTICATED");
+        assertThat(response.getHeaders().getContentType())
+                .hasToString(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
+    }
+
+    @Test
+    void aProtectedEndpoint_withAGarbageToken_isUnauthorized() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth("not.a.real.token");
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/products", HttpMethod.GET, new HttpEntity<>(headers), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void a401_stillCarriesARequestIdForLogCorrelation() {
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/products", HttpMethod.GET, HttpEntity.EMPTY, String.class);
+
+        // RequestIdFilter was split out of TenantResolverFilter precisely so
+        // that requests rejected before the security chain finishes still
+        // correlate to the logs. A null here means that split regressed.
+        assertThat(response.getBody()).contains("requestId");
+        assertThat(response.getBody()).doesNotContain("\"requestId\":null");
+    }
+
+    @Test
+    void health_remainsReachableWithoutAToken() {
+        // Probes run before anything can authenticate.
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/health", HttpMethod.GET, HttpEntity.EMPTY, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void aTokenIssuedForOneTenant_cannotReadAnothersData() {
+        // The tenant now comes from the signed claim, so there is no header
+        // to swap - the only way to act as another tenant is to hold their
+        // token. Creating under acme and listing under demo must not overlap.
+        String acmeToken = login("acme", "admin@acme.test", DEV_PASSWORD).getBody().token();
+        String demoToken = login("demo", "admin@demo.test", DEV_PASSWORD).getBody().token();
+        String code = "isolation-" + UUID.randomUUID();
+
+        ResponseEntity<String> created = restTemplate.exchange(
+                "/api/products", HttpMethod.POST,
+                new HttpEntity<>(new ProductCreateRequest(code, "Isolation Probe", null), bearer(acmeToken)),
+                String.class);
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+        ResponseEntity<String> underDemo = restTemplate.exchange(
+                "/api/products/" + code, HttpMethod.GET,
+                new HttpEntity<>(bearer(demoToken)), String.class);
+
+        assertThat(underDemo.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    private static HttpHeaders bearer(String token) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token);
+        return headers;
     }
 
     private ResponseEntity<TokenResponse> login(String tenantId, String email, String password) {

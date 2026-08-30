@@ -1,7 +1,41 @@
+### Auth — log in as acme's seeded admin and capture the token.
+### Every request below sends it as a bearer token. There is no
+### X-Tenant-Id header any more: the tenant comes from the token's
+### signed tenant_id claim, so a client can no longer choose it.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth — a second tenant, used only for the isolation checks below.
+### Swapping a header used to be enough to act as another tenant; now it
+### takes that tenant's own token, which makes those checks meaningful.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+
 ### Create Customer — happy path
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "externalId": "cus_stripe_12345",
@@ -16,7 +50,7 @@ X-Tenant-Id: acme
 ### Create Customer — no externalId (optional field)
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "email": "bob@acme.test",
@@ -26,7 +60,7 @@ X-Tenant-Id: acme
 ### Create Customer — duplicate email, same tenant (expects 409 CUSTOMER_ALREADY_EXISTS)
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "email": "jane@acme.test",
@@ -36,7 +70,7 @@ X-Tenant-Id: acme
 ### Create Customer — same email, different tenant (expects 201 — tenant isolation check)
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 {
   "email": "jane@acme.test",
@@ -46,7 +80,7 @@ X-Tenant-Id: demo
 ### Create Customer — invalid email format (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "email": "not-an-email",
@@ -56,37 +90,37 @@ X-Tenant-Id: acme
 ### Create Customer — missing name (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "email": "noname@acme.test"
 }
 
-### Create Customer — missing X-Tenant-Id header (expects 400 TENANT_MISSING)
+### Create Customer — no token (expects 401 UNAUTHENTICATED)
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
 
 {
-  "email": "no-tenant@acme.test",
-  "name": "No Tenant"
+  "email": "no-token@acme.test",
+  "name": "No Token"
 }
 
 ### List Customers
 GET {{baseUrl}}/api/customers
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Customers — tenant isolation check (demo should not see acme's customers)
 GET {{baseUrl}}/api/customers
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### Get Customer — by id
 GET {{baseUrl}}/api/customers/{{janeId}}
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Customer — unknown id (expects 404 CUSTOMER_NOT_FOUND)
 GET {{baseUrl}}/api/customers/00000000-0000-0000-0000-000000000000
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Customer — tenant isolation: acme's id under demo (expects 404 CUSTOMER_NOT_FOUND)
 GET {{baseUrl}}/api/customers/{{janeId}}
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}

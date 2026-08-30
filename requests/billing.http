@@ -1,7 +1,41 @@
+### Auth — log in as acme's seeded admin and capture the token.
+### Every request below sends it as a bearer token. There is no
+### X-Tenant-Id header any more: the tenant comes from the token's
+### signed tenant_id claim, so a client can no longer choose it.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth — a second tenant, used only for the isolation checks below.
+### Swapping a header used to be enough to act as another tenant; now it
+### takes that tenant's own token, which makes those checks meaningful.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+
 ### Setup — Product for billing tests
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "code": "billing-test-product",
@@ -11,7 +45,7 @@ X-Tenant-Id: acme
 ### Setup — Plan (no trial, so the subscription starts ACTIVE)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "billing-test-product",
@@ -26,7 +60,7 @@ X-Tenant-Id: acme
 ### jsonb. This meter includes 100 free units, then bills 5 cents each.
 POST {{baseUrl}}/api/plans/billing-test-plan/entitlements
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "key": "api.calls",
@@ -39,7 +73,7 @@ X-Tenant-Id: acme
 ### Setup — Customer, capture id for use below
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "email": "billing-test@acme.test",
@@ -53,7 +87,7 @@ X-Tenant-Id: acme
 ### Setup — Subscription, capture id for use below
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "customerId": "{{billingCustomerId}}",
@@ -68,7 +102,7 @@ X-Tenant-Id: acme
 ### 150 recorded -> 50 billable at 5 cents = 250 cents)
 POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/usage
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "meterKey": "api.calls",
@@ -78,7 +112,7 @@ X-Tenant-Id: acme
 
 ### Generate invoice — before the period closes (expects 409 INVOICE_PERIOD_NOT_CLOSED)
 POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 
 ### --- There is no HTTP endpoint to close a billing period early: it
@@ -95,7 +129,7 @@ X-Tenant-Id: acme
 ### Generate invoice — after the period closes (expects 201, BASE + USAGE lines,
 ### totalCents = 2999 + 250 = 3249). Capture id for use below.
 POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 > {%
     client.global.set("billingInvoiceId", response.body.id);
@@ -103,37 +137,37 @@ X-Tenant-Id: acme
 
 ### Generate invoice — again for the same period (expects 409 INVOICE_ALREADY_EXISTS)
 POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Generate invoice — unknown subscription id (expects 404 SUBSCRIPTION_NOT_FOUND)
 POST {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000/invoices
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Generate invoice — tenant isolation: acme's subscription id under demo
 ### (expects 404 SUBSCRIPTION_NOT_FOUND — must not leak or succeed)
 POST {{baseUrl}}/api/subscriptions/{{billingSubId}}/invoices
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 
 ### Get invoice by id — expects 200 with BASE and USAGE lines
 GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get invoice by id — tenant isolation check (expects 404 INVOICE_NOT_FOUND)
 GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### List invoices for the subscription — expects one invoice
 GET {{baseUrl}}/api/invoices?subscriptionId={{billingSubId}}
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List invoices for the subscription — tenant isolation check (expects empty content)
 GET {{baseUrl}}/api/invoices?subscriptionId={{billingSubId}}
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### List all invoices for the tenant
 GET {{baseUrl}}/api/invoices
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 
 ### --- INVOICE PDFs ---
@@ -147,39 +181,39 @@ X-Tenant-Id: acme
 ### (expects 404 INVOICE_PDF_NOT_GENERATED, not INVOICE_NOT_FOUND: the
 ### invoice exists, its PDF doesn't yet)
 GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Generate the PDF (expects 201, Location header, pdfAvailable: true)
 POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Generate again for the same invoice
 ### (expects 409 INVOICE_PDF_ALREADY_GENERATED — an invoice is immutable
 ### once issued, so its PDF is too)
 POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Download the PDF (expects 200 application/pdf, Content-Disposition
 ### attachment named after the invoice number, e.g. INV-000001.pdf)
 GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get invoice by id — now reports pdfAvailable: true
 GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Generate PDF — unknown invoice id (expects 404 INVOICE_NOT_FOUND)
 POST {{baseUrl}}/api/invoices/00000000-0000-0000-0000-000000000000/pdf
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Generate PDF — tenant isolation: acme's invoice id under demo
 ### (expects 404 INVOICE_NOT_FOUND — must not leak or succeed)
 POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### Download PDF — tenant isolation: acme's invoice id under demo
 ### (expects 404 INVOICE_NOT_FOUND — the bytes must never be reachable
 ### from another tenant, which is why downloads stream through the API
 ### instead of via a presigned object-store URL)
 GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/pdf
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}

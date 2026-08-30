@@ -1,7 +1,41 @@
+### Auth — log in as acme's seeded admin and capture the token.
+### Every request below sends it as a bearer token. There is no
+### X-Tenant-Id header any more: the tenant comes from the token's
+### signed tenant_id claim, so a client can no longer choose it.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth — a second tenant, used only for the isolation checks below.
+### Swapping a header used to be enough to act as another tenant; now it
+### takes that tenant's own token, which makes those checks meaningful.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+
 ### Setup — Product for subscription tests
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "code": "sub-test-product",
@@ -11,7 +45,7 @@ X-Tenant-Id: acme
 ### Setup — Plan WITH a trial (14 days)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "sub-test-product",
@@ -26,7 +60,7 @@ X-Tenant-Id: acme
 ### Setup — Plan WITHOUT a trial
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "sub-test-product",
@@ -40,7 +74,7 @@ X-Tenant-Id: acme
 ### Setup — Customer, capture id for use below
 POST {{baseUrl}}/api/customers
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "email": "sub-test@acme.test",
@@ -55,7 +89,7 @@ X-Tenant-Id: acme
 ### Create Subscription — WITH trial (expects status TRIALING, currentPeriodEnd ~14 days out)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "customerId": "{{customerId}}",
@@ -65,7 +99,7 @@ X-Tenant-Id: acme
 ### Create Subscription — WITHOUT trial (expects status ACTIVE, currentPeriodEnd ~1 month out)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "customerId": "{{customerId}}",
@@ -75,7 +109,7 @@ X-Tenant-Id: acme
 ### Create Subscription — unknown customerId (expects 404 CUSTOMER_NOT_FOUND)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "customerId": "00000000-0000-0000-0000-000000000000",
@@ -85,7 +119,7 @@ X-Tenant-Id: acme
 ### Create Subscription — unknown planCode (expects 404 PLAN_NOT_FOUND)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "customerId": "{{customerId}}",
@@ -95,7 +129,7 @@ X-Tenant-Id: acme
 ### Create Subscription — missing customerId (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "planCode": "sub-trial-monthly"
@@ -104,7 +138,7 @@ X-Tenant-Id: acme
 ### Create Subscription — missing planCode (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "customerId": "{{customerId}}"
@@ -115,7 +149,7 @@ X-Tenant-Id: acme
 ### nor the plan exist for the demo tenant, so this must NOT succeed)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 {
   "customerId": "{{customerId}}",
@@ -124,21 +158,21 @@ X-Tenant-Id: demo
 
 ### List Subscriptions — all, for acme
 GET {{baseUrl}}/api/subscriptions
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Subscriptions — filtered by customerId
 GET {{baseUrl}}/api/subscriptions?customerId={{customerId}}
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Subscriptions — tenant isolation check (demo should see none of these)
 GET {{baseUrl}}/api/subscriptions
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 
 ### Setup — Subscription for state-transition tests (trial plan -> TRIALING)
 POST {{baseUrl}}/api/subscriptions
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "customerId": "{{customerId}}",
@@ -151,49 +185,49 @@ X-Tenant-Id: acme
 
 ### Get Subscription — by id
 GET {{baseUrl}}/api/subscriptions/{{transitionSubId}}
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Subscription — unknown id (expects 404 SUBSCRIPTION_NOT_FOUND)
 GET {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Subscription — tenant isolation: acme's id under demo (expects 404 SUBSCRIPTION_NOT_FOUND)
 GET {{baseUrl}}/api/subscriptions/{{transitionSubId}}
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### Pause — TRIALING -> PAUSED (expects 200, status PAUSED)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/pause
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Pause — already PAUSED (expects 409 INVALID_SUBSCRIPTION_STATE)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/pause
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Resume — PAUSED -> ACTIVE (expects 200, status ACTIVE)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/resume
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Resume — not PAUSED (expects 409 INVALID_SUBSCRIPTION_STATE)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/resume
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Cancel — ACTIVE -> CANCELED (expects 200, status CANCELED, canceledAt set)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/cancel
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Cancel — already CANCELED (expects 409 INVALID_SUBSCRIPTION_STATE)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/cancel
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Pause — a CANCELED subscription (expects 409 INVALID_SUBSCRIPTION_STATE)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/pause
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Cancel — tenant isolation: demo tries to cancel acme's subscription id
 ### (expects 404 SUBSCRIPTION_NOT_FOUND — must not leak or succeed)
 POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/cancel
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### Cancel — unknown subscription id (expects 404 SUBSCRIPTION_NOT_FOUND)
 POST {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000/cancel
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}

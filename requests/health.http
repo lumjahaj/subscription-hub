@@ -1,22 +1,44 @@
+### Auth — log in as acme's seeded admin and capture the token.
+### Every request below sends it as a bearer token. There is no
+### X-Tenant-Id header any more: the tenant comes from the token's
+### signed tenant_id claim, so a client can no longer choose it.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+
 ### Ping — happy path (known tenant)
 # Verifies the tenant filter resolves a known tenant and lets the request through.
 GET {{baseUrl}}/ping
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
-### Ping — missing tenant (expects 400)
-# No X-Tenant-Id header at all -> tenant filter should throw MissingTenantException -> 400 Problem+JSON
+### Ping — no token (expects 401 UNAUTHENTICATED)
+# There is no "missing tenant" case any more: with the tenant carried in a
+# signed claim, the absence of a tenant is simply the absence of a token,
+# and Spring Security rejects it before any tenant logic runs.
 GET {{baseUrl}}/ping
 
-### Ping — unknown tenant (expects 401)
-# X-Tenant-Id set to a value that doesn't resolve to a real tenant -> UnknownTenantException -> 401 Problem+JSON
+### Ping — a token that isn't one (expects 401)
+# Nothing can be forged without the signing secret, so an unparseable or
+# tampered token is rejected exactly like no token at all.
 GET {{baseUrl}}/ping
-X-Tenant-Id: does-not-exist
+Authorization: Bearer not.a.real.token
 
-### Show request/response with MDC requestId echoed in errors (trigger a 401)
-# Same as above, but the point of this one is to inspect the Problem+JSON body
-# and confirm "requestId" in the response matches the requestId in the server logs (MDC).
+### Inspect the Problem+JSON body of a 401
+# Confirms "requestId" is present and matches the requestId in the server
+# logs (MDC). Worth checking specifically: Spring Security rejects inside
+# the filter chain, before any controller, so this body exists only because
+# SecurityProblemHandler renders it - the framework default is an empty 401.
 GET {{baseUrl}}/ping
-X-Tenant-Id: does-not-exist
 
 ### OpenAPI JSON - public group
 GET {{baseUrl}}/v3/api-docs
@@ -24,8 +46,8 @@ GET {{baseUrl}}/v3/api-docs
 ### Swagger UI
 GET {{baseUrl}}/swagger-ui/index.html
 
-### Example: product list (placeholder for later endpoints; keeps header wiring handy)
-# Not implemented yet (catalog API is backlog item after DTOs/validation) — kept here
-# so the X-Tenant-Id wiring pattern is ready to copy once /api/products exists.
+### Example: product list
+# The catalog API exists now; kept here as the smallest example of an
+# authenticated, tenant-scoped call.
 GET {{baseUrl}}/api/products
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}

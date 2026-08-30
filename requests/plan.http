@@ -1,7 +1,41 @@
+### Auth — log in as acme's seeded admin and capture the token.
+### Every request below sends it as a bearer token. There is no
+### X-Tenant-Id header any more: the tenant comes from the token's
+### signed tenant_id claim, so a client can no longer choose it.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth — a second tenant, used only for the isolation checks below.
+### Swapping a header used to be enough to act as another tenant; now it
+### takes that tenant's own token, which makes those checks meaningful.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+
 ### Setup — create a Product for plans to reference
 POST {{baseUrl}}/api/products
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "code": "messaging",
@@ -12,7 +46,7 @@ X-Tenant-Id: acme
 ### Create Plan — happy path
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "messaging",
@@ -29,7 +63,7 @@ X-Tenant-Id: acme
 ### (expects entity defaults: EUR, 0, 1)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "messaging",
@@ -42,7 +76,7 @@ X-Tenant-Id: acme
 ### Create Plan — quarterly billing (intervalUnit MONTH, intervalCount 3)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "messaging",
@@ -57,7 +91,7 @@ X-Tenant-Id: acme
 ### Create Plan — biennial billing (intervalUnit YEAR, intervalCount 2)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "messaging",
@@ -72,7 +106,7 @@ X-Tenant-Id: acme
 ### Create Plan — duplicate code, same tenant (expects 409 PLAN_ALREADY_EXISTS)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "messaging",
@@ -85,7 +119,7 @@ X-Tenant-Id: acme
 ### Create Plan — unknown productCode (expects 404 PRODUCT_NOT_FOUND)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "does-not-exist",
@@ -98,7 +132,7 @@ X-Tenant-Id: acme
 ### Create Plan — invalid intervalUnit (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "messaging",
@@ -111,7 +145,7 @@ X-Tenant-Id: acme
 ### Create Plan — zero intervalCount (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/plans
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "productCode": "messaging",
@@ -124,23 +158,23 @@ X-Tenant-Id: acme
 
 ### List Plans
 GET {{baseUrl}}/api/plans
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Plans — tenant isolation check (demo tenant should see none of acme's plans)
 GET {{baseUrl}}/api/plans
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 ### Get Plan — by code
 GET {{baseUrl}}/api/plans/pro-monthly
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Plan — unknown code (expects 404 PLAN_NOT_FOUND)
 GET {{baseUrl}}/api/plans/does-not-exist
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### Get Plan — tenant isolation: acme's plan code under demo (expects 404 PLAN_NOT_FOUND)
 GET {{baseUrl}}/api/plans/pro-monthly
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}
 
 
 ### ============================================================
@@ -150,7 +184,7 @@ X-Tenant-Id: demo
 ### Create Entitlement — object value
 POST {{baseUrl}}/api/plans/pro-monthly/entitlements
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "key": "max_users",
@@ -160,7 +194,7 @@ X-Tenant-Id: acme
 ### Create Entitlement — boolean value
 POST {{baseUrl}}/api/plans/pro-monthly/entitlements
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "key": "priority_support",
@@ -170,7 +204,7 @@ X-Tenant-Id: acme
 ### Create Entitlement — duplicate key on same plan (expects 409 PLANENTITLEMENT_ALREADY_EXISTS)
 POST {{baseUrl}}/api/plans/pro-monthly/entitlements
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "key": "max_users",
@@ -180,7 +214,7 @@ X-Tenant-Id: acme
 ### Create Entitlement — same key on a DIFFERENT plan (expects 201 — key uniqueness is per-plan, not global)
 POST {{baseUrl}}/api/plans/basic-monthly/entitlements
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "key": "max_users",
@@ -190,7 +224,7 @@ X-Tenant-Id: acme
 ### Create Entitlement — unknown plan code (expects 404 PLAN_NOT_FOUND)
 POST {{baseUrl}}/api/plans/does-not-exist/entitlements
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "key": "max_users",
@@ -200,7 +234,7 @@ X-Tenant-Id: acme
 ### Create Entitlement — missing value (expects 400 VALIDATION_ERROR)
 POST {{baseUrl}}/api/plans/pro-monthly/entitlements
 Content-Type: application/json
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 {
   "key": "no_value_key"
@@ -208,8 +242,8 @@ X-Tenant-Id: acme
 
 ### List Entitlements for pro-monthly
 GET {{baseUrl}}/api/plans/pro-monthly/entitlements
-X-Tenant-Id: acme
+Authorization: Bearer {{acmeToken}}
 
 ### List Entitlements — tenant isolation check
 GET {{baseUrl}}/api/plans/pro-monthly/entitlements
-X-Tenant-Id: demo
+Authorization: Bearer {{demoToken}}

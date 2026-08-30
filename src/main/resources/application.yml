@@ -46,7 +46,19 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,httptrace
+        # httptrace removed: it is a Spring Boot 2 endpoint id (renamed to
+        # httpexchanges in Boot 3) and additionally needs an
+        # HttpExchangeRepository bean that nothing here defines, so it has
+        # been doing nothing. Deleted rather than repaired - that endpoint
+        # records request and response headers, which now means bearer
+        # tokens would sit in a queryable endpoint.
+        include: health,info
+  endpoint:
+    health:
+      # Explicit even though `never` is the default, so a later change to
+      # `always` can't quietly start publishing database and disk internals
+      # to an unauthenticated probe.
+      show-details: when-authorized
 
 logging:
   pattern:

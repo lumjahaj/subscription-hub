@@ -6,6 +6,8 @@ import io.swagger.v3.oas.models.servers.Server;
 import io.swagger.v3.oas.models.media.*;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.Components;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
+import io.swagger.v3.oas.models.security.SecurityScheme;
 import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springdoc.core.models.GroupedOpenApi;
 import org.springframework.context.annotation.Bean;
@@ -16,16 +18,39 @@ import java.util.List;
 @Configuration
 public class OpenApiConfig {
 
+    private static final String BEARER_SCHEME = "bearerAuth";
+
+    /**
+     * Declares bearer auth globally so Swagger UI shows an Authorize button
+     * and sends the token on every try-it-out call.
+     *
+     * Applied as a global requirement rather than per-operation because
+     * every endpoint needs it except POST /api/auth/token — and an
+     * operation that ignores an Authorization header is harmless, whereas
+     * forgetting to declare it on a new controller would silently make
+     * that endpoint untestable from the UI.
+     */
     @Bean
     OpenAPI baseOpenAPI() {
         return new OpenAPI()
                 .info(new Info()
                         .title("Subscription Hub API")
                         .version("v0.1")
-                        .description("Multi-tenant billing & subscriptions (portfolio project)")
+                        .description("""
+                                Multi-tenant billing & subscriptions (portfolio project).
+
+                                Obtain a token from POST /api/auth/token, then use Authorize.
+                                The tenant comes from the token's tenant_id claim - there is no
+                                tenant header.""")
                         .license(new License().name("MIT"))
                 )
-                .servers(List.of(new Server().url("http://localhost:8080")));
+                .servers(List.of(new Server().url("http://localhost:8080")))
+                .components(new Components().addSecuritySchemes(BEARER_SCHEME,
+                        new SecurityScheme()
+                                .type(SecurityScheme.Type.HTTP)
+                                .scheme("bearer")
+                                .bearerFormat("JWT")))
+                .addSecurityItem(new SecurityRequirement().addList(BEARER_SCHEME));
     }
 
     @Bean

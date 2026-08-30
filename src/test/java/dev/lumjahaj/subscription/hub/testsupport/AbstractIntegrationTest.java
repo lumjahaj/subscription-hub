@@ -1,16 +1,26 @@
 package dev.lumjahaj.subscription.hub.testsupport;
 
-import dev.lumjahaj.subscription.hub.tenancy.api.TenantResolverFilter;
+import dev.lumjahaj.subscription.hub.auth.api.dto.TokenRequest;
+import dev.lumjahaj.subscription.hub.auth.api.dto.TokenResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.MinIOContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Base for integration tests that need a real Postgres and a real HTTP
@@ -56,6 +66,9 @@ import org.testcontainers.containers.PostgreSQLContainer;
 })
 public abstract class AbstractIntegrationTest {
 
+    /** Matches the bcrypt hash seeded by Flyway V8 for both tenants' admins. */
+    private static final String SEEDED_PASSWORD = "subscriptionhub";
+
     @ServiceConnection
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
 
@@ -80,9 +93,50 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected TestRestTemplate restTemplate;
 
-    protected static HttpHeaders tenantHeaders(String tenantId) {
+    /**
+     * Tokens are cached across every test class in the run. They are
+     * immutable, valid for an hour, and identical for a given tenant, so
+     * re-issuing one per call would add a bcrypt verification (~100ms by
+     * design) to all 59 call sites for nothing.
+     */
+    private static final Map<String, String> TOKENS = new ConcurrentHashMap<>();
+
+    /**
+     * Same name and signature it had when the tenant travelled in an
+     * X-Tenant-Id header — only the implementation changed, which is why
+     * no test class needed editing when authentication landed.
+     *
+     * What the tests assert got stronger for free: tenantHeaders("demo")
+     * against acme's data still expects a 404, but now because the caller
+     * is genuinely authenticated as demo, not because it claimed to be.
+     *
+     * No longer static, since issuing a token needs restTemplate. Every
+     * caller is an instance method, so that change was invisible too.
+     */
+    protected HttpHeaders tenantHeaders(String tenantId) {
         HttpHeaders headers = new HttpHeaders();
-        headers.set(TenantResolverFilter.TENANT_HEADER, tenantId);
+        headers.setBearerAuth(TOKENS.computeIfAbsent(tenantId, this::login));
         return headers;
+    }
+
+    /**
+     * Logs in as the tenant's seeded admin over real HTTP rather than
+     * minting a token with the signing key directly. A token this suite
+     * fabricated could diverge from one AuthService actually issues — a
+     * missing claim would then be invisible here and fail in production.
+     */
+    private String login(String tenantId) {
+        ResponseEntity<TokenResponse> response = restTemplate.exchange(
+                "/api/auth/token", HttpMethod.POST,
+                new HttpEntity<>(new TokenRequest(tenantId, "admin@" + tenantId + ".test", SEEDED_PASSWORD)),
+                TokenResponse.class);
+
+        // Asserted before use: a failed login otherwise surfaces as a
+        // NullPointerException in whichever unrelated test happened to ask
+        // for the token first.
+        assertThat(response.getStatusCode())
+                .as("login for seeded admin of tenant '%s'", tenantId)
+                .isEqualTo(HttpStatus.OK);
+        return response.getBody().token();
     }
 }
