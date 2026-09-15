@@ -1,8 +1,6 @@
 package dev.lumjahaj.subscription.hub.common.api;
 
 import dev.lumjahaj.subscription.hub.common.logging.MdcKeys;
-import dev.lumjahaj.subscription.hub.tenancy.api.MissingTenantException;
-import dev.lumjahaj.subscription.hub.tenancy.api.UnknownTenantException;
 import org.hibernate.exception.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,16 +42,6 @@ public class ProblemDetailsAdvice {
         pd.setProperty("code", code);
         pd.setProperty("requestId", MDC.get(MdcKeys.REQUEST_ID));
         return pd;
-    }
-
-    @ExceptionHandler(MissingTenantException.class)
-    ProblemDetail handleMissingTenant(MissingTenantException ex) {
-        return base(HttpStatus.BAD_REQUEST, "TENANT_MISSING", ex.getMessage());
-    }
-
-    @ExceptionHandler(UnknownTenantException.class)
-    ProblemDetail handleUnknownTenant(UnknownTenantException ex) {
-        return base(HttpStatus.UNAUTHORIZED, "TENANT_UNKNOWN", ex.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
