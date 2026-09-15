@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.tenancy.infra;
+package dev.lumjahaj.subscription.hub.tenancy.infra.jpa;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 

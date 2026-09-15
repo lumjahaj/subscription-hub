@@ -1,6 +1,6 @@
 package dev.lumjahaj.subscription.hub.catalog.infra.jpa;
 
-import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
+import dev.lumjahaj.subscription.hub.tenancy.infra.jpa.TenantScoped;
 import jakarta.persistence.*;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;

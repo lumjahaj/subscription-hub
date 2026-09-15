@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.tenancy.infra;
+package dev.lumjahaj.subscription.hub.tenancy.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.tenancy.domain.Tenant;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantRepository;

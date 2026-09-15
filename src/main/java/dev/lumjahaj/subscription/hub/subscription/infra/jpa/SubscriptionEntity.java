@@ -3,7 +3,7 @@ package dev.lumjahaj.subscription.hub.subscription.infra.jpa;
 import dev.lumjahaj.subscription.hub.customer.infra.jpa.CustomerEntity;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
-import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
+import dev.lumjahaj.subscription.hub.tenancy.infra.jpa.TenantScoped;
 import jakarta.persistence.*;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;

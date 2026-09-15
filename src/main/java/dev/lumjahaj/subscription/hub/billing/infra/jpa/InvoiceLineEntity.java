@@ -1,7 +1,7 @@
 package dev.lumjahaj.subscription.hub.billing.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceLineKind;
-import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
+import dev.lumjahaj.subscription.hub.tenancy.infra.jpa.TenantScoped;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;

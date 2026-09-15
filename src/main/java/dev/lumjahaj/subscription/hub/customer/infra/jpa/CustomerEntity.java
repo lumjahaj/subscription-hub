@@ -1,6 +1,6 @@
 package dev.lumjahaj.subscription.hub.customer.infra.jpa;
 
-import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
+import dev.lumjahaj.subscription.hub.tenancy.infra.jpa.TenantScoped;
 import jakarta.persistence.*;
 
 @Entity

@@ -1,6 +1,6 @@
 package dev.lumjahaj.subscription.hub.config;
 
-import dev.lumjahaj.subscription.hub.tenancy.infra.TenantIdentifierResolver;
+import dev.lumjahaj.subscription.hub.tenancy.infra.jpa.TenantIdentifierResolver;
 import org.hibernate.cfg.MultiTenancySettings;
 import org.springframework.boot.autoconfigure.orm.jpa.HibernatePropertiesCustomizer;
 import org.springframework.context.annotation.Bean;

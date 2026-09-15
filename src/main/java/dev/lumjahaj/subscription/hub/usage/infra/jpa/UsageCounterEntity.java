@@ -1,7 +1,7 @@
 package dev.lumjahaj.subscription.hub.usage.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
-import dev.lumjahaj.subscription.hub.tenancy.infra.TenantScoped;
+import dev.lumjahaj.subscription.hub.tenancy.infra.jpa.TenantScoped;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
