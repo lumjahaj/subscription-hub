@@ -295,6 +295,26 @@ explicit handler for it, or the catch-all `@ExceptionHandler(Exception.class)`
 reports a forbidden request as 500 and the endpoint looks broken rather than
 protected.
 
+**Billing invariants** — each looks like a harmless cleanup and silently costs
+revenue or tenant isolation. The full reasoning is under Current state in the
+subscription-hub-state skill.
+- **Invoice before renew, per subscription, in `BillingCycleJob`.** Renewal
+  overwrites `currentPeriodStart`, so a period renewed before it is invoiced can
+  never be billed. Only an "already exists" invoicing failure may proceed to
+  renewal; any other failure leaves the subscription due. Never split the two
+  onto separate schedules.
+- **`nextRenewal == currentPeriodEnd` at every write site** (`SubscriptionService`
+  create, both branches; `SubscriptionRenewalService.applyRenewal`). The job reuses
+  the renewal finder on the strength of it. If a change makes them diverge,
+  billing needs its own finder.
+- **PDF generation stays out of the billing transaction.** No remote call inside
+  `InvoiceService.generateForCurrentPeriod`, and a PDF failure in the job never
+  blocks renewal — a missing PDF is recoverable via `POST /api/invoices/{id}/pdf`,
+  a missed invoice is not.
+- **Invoice PDFs stream through the API, never a presigned URL.** Downloads must
+  stay inside the tenant-scoped request path; object keys are storage layout, not
+  a security boundary, and never appear in a response.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
 
