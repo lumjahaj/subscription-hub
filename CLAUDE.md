@@ -215,8 +215,11 @@ types for genuine business-rule violations (invalid state transitions, etc.),
 where the difference carries real information.
 
 **Controllers** — `@RestController`, constructor injection, `201 CREATED` on
-create, `Pageable` parameter on list endpoints, map `Page<Entity>` →
-`Page<Response>` via `page.map(Mapper::toResponse)`.
+create, `Pageable` parameter on top-level list endpoints, map `Page<Entity>` →
+`PagedResponse<Response>` via `PagedResponse.from(page, Mapper::toResponse)` —
+never return a raw `Page<T>`, whose `PageImpl` serialization isn't a documented
+contract. Nested per-parent collections (`/api/plans/{planCode}/entitlements`,
+`/api/subscriptions/{subscriptionId}/usage`) return a plain `List<Response>`.
 
 **Money** — always integer minor units (`amountCents`, `long`). Never floating
 point.
