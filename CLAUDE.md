@@ -72,7 +72,7 @@ Feature-based modules, each with the same internal layering:
 ```
 common/          api, logging, web — cross-cutting, depends on nothing
 auth/            api, app, domain, infra/jpa
-tenancy/         api, domain, infra
+tenancy/         api, domain, infra/jpa
 catalog/         api, app, domain, infra/jpa
 customer/        api, app, domain, infra/jpa
 subscription/    api, app, domain, infra/jpa
@@ -358,7 +358,7 @@ Seeded tenants for local dev: `acme`, `demo`.
 - OpenAPI/Swagger — `/swagger-ui/index.html`, `/v3/api-docs`, reusable Problem
   schema attached to error responses
 - **Structural tenant isolation** — Hibernate `@TenantId` on
-  `TenantScoped.tenantId`, resolved via `tenancy/infra/TenantIdentifierResolver`
+  `TenantScoped.tenantId`, resolved via `tenancy/infra/jpa/TenantIdentifierResolver`
   (wraps `TenantContext`), wired through `JpaConfig`'s
   `HibernatePropertiesCustomizer`. Spring Boot does **not** auto-detect a
   `CurrentTenantIdentifierResolver` bean — `hibernate.tenant_identifier_resolver`
@@ -616,6 +616,26 @@ Seeded tenants for local dev: `acme`, `demo`.
   - Seeded dev logins (`admin@acme.test`, `admin@demo.test`, `support@acme.test`,
     password `subscriptionhub`) live in `db/seed` under the `dev` profile, not in
     `db/migration` — see §5.
+- **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
+  `com.tngtech.archunit:archunit-junit5`) turns §3/§5's layering and naming
+  rules into executable checks: no `..domain..`/`..api..` dependency on
+  `..infra..` beyond the `*Entity` carve-out below, `common` never depends on
+  a feature module, Spring Data types stay behind `..infra.jpa..`, the domain
+  stays free of `jakarta.persistence`, Thymeleaf/openhtmltopdf/the AWS SDK
+  each stay inside their one adapter package, `*Controller`/`*RepositoryImpl`/
+  `*Entity` sit where their name says, no cycles between feature-module
+  slices, and no field-level `@Autowired`. Pure bytecode analysis — no Spring
+  context, no containers — so it runs in milliseconds alongside the unit
+  tests. Rules 1a/1c (`domain`/`api` → `infra`) explicitly allow a dependency
+  on a class ending in `Entity` inside `..infra.jpa..`: §3 already documents
+  that catalog/customer/subscription have no separate domain model, so ports
+  and mappers seeing the entity directly is the deliberate consequence of
+  that choice, not drift. ArchUnit checks declared dependencies (fields,
+  parameters, return types, method bodies), so it can't see an entity that
+  only passes through as an uncaptured local variable — a couple of
+  controllers that read an entity's `getId()`/`getCode()` to build a
+  `Location` header get flagged where others that only forward the entity to
+  a mapper don't; the rule undercounts that coupling, never overcounts it.
 
 **Endpoints:**
 ```
