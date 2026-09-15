@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.tenancy;
+package dev.lumjahaj.subscription.hub.tenancy.api;
 
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.springframework.web.bind.annotation.GetMapping;
