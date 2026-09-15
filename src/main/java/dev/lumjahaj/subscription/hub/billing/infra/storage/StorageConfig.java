@@ -1,4 +1,4 @@
-package dev.lumjahaj.subscription.hub.config;
+package dev.lumjahaj.subscription.hub.billing.infra.storage;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
