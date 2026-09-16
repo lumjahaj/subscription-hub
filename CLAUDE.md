@@ -59,7 +59,13 @@ since the verification side is already the standard machinery — the same
 
 Planned: Redis, MailHog/Mailpit, WireMock, Micrometer, Prometheus, Grafana.
 
-Everything must stay **free and locally runnable**.
+**Free, and runnable from a clean clone.** Nothing requires a paid service. With
+only Docker, the app boots and the full test suite passes offline, with no
+accounts or secrets. External providers (e.g. Stripe test mode) are opt-in
+adapters chosen by config; the default is a local fake, and tests never call a
+real provider. This replaced "free and locally runnable": the parts worth
+protecting are cost, a stranger's first run, and hermetic tests — not whether a
+developer's own manual run may reach the internet.
 
 Dev environment: Windows, IntelliJ IDEA, Docker Desktop. API testing via
 IntelliJ REST Client `.http` files in `requests/`.
