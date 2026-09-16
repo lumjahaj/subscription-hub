@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.notification.app;
 
+import dev.lumjahaj.subscription.hub.billing.domain.InvoiceIssuedListener;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
 import dev.lumjahaj.subscription.hub.common.api.ResourceNotFoundException;
@@ -41,7 +42,7 @@ import java.util.UUID;
  * the constraint is never expected to fire.
  */
 @Service
-public class NotificationService {
+public class NotificationService implements InvoiceIssuedListener {
 
     private static final Logger log = LoggerFactory.getLogger(NotificationService.class);
     private static final DateTimeFormatter DATE =
@@ -65,10 +66,8 @@ public class NotificationService {
      * Reloads the invoice rather than trusting the caller passed the right
      * one - InvoiceService calls this synchronously in the same transaction
      * right after saving, so the row is guaranteed to be there.
-     *
-     * Not yet wired to anything: this becomes the implementation of
-     * billing/domain/InvoiceIssuedListener once that port exists.
      */
+    @Override
     @Transactional
     public void onInvoiceIssued(UUID invoiceId) {
         String tenantId = TenantContext.getTenantId();

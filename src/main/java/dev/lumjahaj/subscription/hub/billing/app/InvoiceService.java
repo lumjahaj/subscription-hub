@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.billing.app;
 
+import dev.lumjahaj.subscription.hub.billing.domain.InvoiceIssuedListener;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
@@ -32,19 +33,28 @@ public class InvoiceService {
     private final UsageCounterRepository usageCounters;
     private final MeterPriceResolver meterPrices;
     private final int dueDays;
+    private final List<InvoiceIssuedListener> listeners;
 
+    /**
+     * The listener list is injected rather than a single collaborator, and
+     * may be empty - the same shape PaymentSettlementService uses for
+     * PaymentOutcomeListener. Billing works on its own; notification is one
+     * optional reaction to an invoice existing, not part of generating one.
+     */
     public InvoiceService(
             InvoiceRepository invoices,
             SubscriptionRepository subscriptions,
             UsageCounterRepository usageCounters,
             MeterPriceResolver meterPrices,
-            @Value("${billing.invoice.due-days}") int dueDays
+            @Value("${billing.invoice.due-days}") int dueDays,
+            List<InvoiceIssuedListener> listeners
     ) {
         this.invoices = invoices;
         this.subscriptions = subscriptions;
         this.usageCounters = usageCounters;
         this.meterPrices = meterPrices;
         this.dueDays = dueDays;
+        this.listeners = listeners;
     }
 
     /**
@@ -99,7 +109,13 @@ public class InvoiceService {
         invoice.setTotalCents(InvoiceCalculator.totalCents(lines));
         lines.forEach(invoice::addLine);
 
-        return invoices.save(invoice);
+        InvoiceEntity saved = invoices.save(invoice);
+        // Inside this transaction, like PaymentSettlementService's
+        // notifyListeners: a listener that enqueues an outbox row and then
+        // rolls back must take the invoice down with it, not leave an
+        // email queued for an invoice that was never actually created.
+        listeners.forEach(listener -> listener.onInvoiceIssued(saved.getId()));
+        return saved;
     }
 
     public InvoiceEntity getById(UUID id) {
