@@ -3,6 +3,7 @@ package dev.lumjahaj.subscription.hub.customer.api;
 import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerCreateRequest;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerResponse;
+import dev.lumjahaj.subscription.hub.customer.api.dto.PaymentMethodRequest;
 import dev.lumjahaj.subscription.hub.customer.api.mapper.CustomerMapper;
 import dev.lumjahaj.subscription.hub.customer.app.CustomerService;
 import dev.lumjahaj.subscription.hub.customer.infra.jpa.CustomerEntity;
@@ -41,6 +42,31 @@ public class CustomerController {
     @GetMapping("/{id}")
     public ResponseEntity<CustomerResponse> getById(@PathVariable UUID id) {
         CustomerEntity customer = customerService.getById(id);
+        return ResponseEntity.ok(CustomerMapper.toResponse(customer));
+    }
+
+    /**
+     * PUT, not POST: storing a payment method is setting one field to a
+     * given value, and sending the same token twice must leave the customer
+     * in the same state rather than creating anything.
+     *
+     * The stored token is never returned — the response carries
+     * hasDefaultPaymentMethod instead.
+     */
+    @PutMapping("/{id}/payment-method")
+    @PreAuthorize(Authorize.COMMERCIAL)
+    public ResponseEntity<CustomerResponse> setPaymentMethod(
+            @PathVariable UUID id,
+            @Valid @RequestBody PaymentMethodRequest request
+    ) {
+        CustomerEntity customer = customerService.setDefaultPaymentMethod(id, request.paymentMethod());
+        return ResponseEntity.ok(CustomerMapper.toResponse(customer));
+    }
+
+    @DeleteMapping("/{id}/payment-method")
+    @PreAuthorize(Authorize.COMMERCIAL)
+    public ResponseEntity<CustomerResponse> clearPaymentMethod(@PathVariable UUID id) {
+        CustomerEntity customer = customerService.clearDefaultPaymentMethod(id);
         return ResponseEntity.ok(CustomerMapper.toResponse(customer));
     }
 

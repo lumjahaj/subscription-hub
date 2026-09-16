@@ -45,4 +45,30 @@ public class CustomerService {
         return customers.findByTenantIdAndId(tenantId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Customer", id.toString()));
     }
+
+    /**
+     * Stores the token automatic collection will charge. Replacing an
+     * existing one is a plain overwrite, not a conflict: a customer whose
+     * card expired sends the new token to the same endpoint.
+     *
+     * The old token is not kept. Nothing can be done with a superseded
+     * provider token, and keeping payment credentials around after they
+     * stop being needed is how they end up somewhere they shouldn't be.
+     */
+    public CustomerEntity setDefaultPaymentMethod(UUID id, String paymentMethod) {
+        CustomerEntity customer = getById(id);
+        customer.setDefaultPaymentMethod(paymentMethod);
+        return customers.save(customer);
+    }
+
+    /**
+     * Clearing is idempotent — a customer with no stored method stays that
+     * way rather than 404ing on the second call — because the resource
+     * being cleared is a field, not a row.
+     */
+    public CustomerEntity clearDefaultPaymentMethod(UUID id) {
+        CustomerEntity customer = getById(id);
+        customer.setDefaultPaymentMethod(null);
+        return customers.save(customer);
+    }
 }

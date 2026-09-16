@@ -1,0 +1,14 @@
+-- A payment method the system can charge without a human present.
+--
+-- Until now a payment method only ever arrived in the request body, which
+-- is fine for a person clicking "pay" and impossible for a scheduled job:
+-- dunning has to retry a failed invoice days later, with nobody to ask.
+--
+-- Nullable on purpose. A customer without one is simply never charged
+-- automatically - their invoices stay OPEN for a human to collect - rather
+-- than the system inventing a fallback.
+--
+-- Holds a provider token (Stripe's "pm_..."), never card data: the card
+-- itself never reaches this application, which is what keeps it out of PCI
+-- scope. varchar(64) matches payment.payment_method.
+ALTER TABLE customer ADD COLUMN default_payment_method varchar(64);

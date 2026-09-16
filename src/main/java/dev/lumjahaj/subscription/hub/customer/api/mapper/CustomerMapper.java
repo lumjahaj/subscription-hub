@@ -23,6 +23,7 @@ public final class CustomerMapper {
                 entity.getExternalId(),
                 entity.getEmail(),
                 entity.getName(),
+                entity.getDefaultPaymentMethod() != null,
                 entity.getCreatedAt(),
                 entity.getUpdatedAt()
         );

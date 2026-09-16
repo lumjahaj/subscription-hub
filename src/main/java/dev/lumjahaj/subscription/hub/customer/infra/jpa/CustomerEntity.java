@@ -23,6 +23,11 @@ public class CustomerEntity extends TenantScoped {
     @Column(nullable = false)
     private String name;
 
+    // A provider token (e.g. Stripe's "pm_..."), never card data. NULL means
+    // this customer is never charged automatically - see V12.
+    @Column(name = "default_payment_method", length = 64)
+    private String defaultPaymentMethod;
+
     public java.util.UUID getId() {return id;}
     public void setId(java.util.UUID id) {this.id = id;}
     public String getExternalId() {return externalId;}
@@ -31,4 +36,6 @@ public class CustomerEntity extends TenantScoped {
     public void setEmail(String email) {this.email = email;}
     public String getName() {return name;}
     public void setName(String name) {this.name = name;}
+    public String getDefaultPaymentMethod() {return defaultPaymentMethod;}
+    public void setDefaultPaymentMethod(String defaultPaymentMethod) {this.defaultPaymentMethod = defaultPaymentMethod;}
 }

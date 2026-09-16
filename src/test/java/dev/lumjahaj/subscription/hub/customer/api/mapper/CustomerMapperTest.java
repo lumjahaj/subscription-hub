@@ -2,6 +2,7 @@ package dev.lumjahaj.subscription.hub.customer.api.mapper;
 
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerCreateRequest;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerResponse;
+import dev.lumjahaj.subscription.hub.customer.api.dto.PaymentMethodRequest;
 import dev.lumjahaj.subscription.hub.customer.infra.jpa.CustomerEntity;
 import dev.lumjahaj.subscription.hub.testsupport.MapperValidationSupport;
 import jakarta.validation.ConstraintViolation;
@@ -54,6 +55,29 @@ class CustomerMapperTest extends MapperValidationSupport {
         assertThat(response.name()).isEqualTo("Jane Doe");
         assertThat(response.createdAt()).isEqualTo(entity.getCreatedAt());
         assertThat(response.updatedAt()).isEqualTo(entity.getUpdatedAt());
+        assertThat(response.hasDefaultPaymentMethod()).isFalse();
+    }
+
+    @Test
+    void toResponse_reportsAStoredPaymentMethodWithoutExposingTheToken() {
+        CustomerEntity entity = new CustomerEntity();
+        entity.setId(UUID.randomUUID());
+        entity.setEmail("jane@acme.com");
+        entity.setName("Jane Doe");
+        entity.setDefaultPaymentMethod("pm_card_visa");
+
+        CustomerResponse response = CustomerMapper.toResponse(entity);
+
+        assertThat(response.hasDefaultPaymentMethod()).isTrue();
+        assertThat(response.toString()).doesNotContain("pm_card_visa");
+    }
+
+    @Test
+    void request_rejectsABlankPaymentMethod() {
+        Set<ConstraintViolation<PaymentMethodRequest>> violations =
+                VALIDATOR.validate(new PaymentMethodRequest(" "));
+
+        assertThat(violations).isNotEmpty();
     }
 
     @Test
