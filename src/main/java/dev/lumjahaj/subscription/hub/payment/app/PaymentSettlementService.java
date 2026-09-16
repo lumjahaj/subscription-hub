@@ -5,6 +5,7 @@ import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentEvent;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentEventHandler;
+import dev.lumjahaj.subscription.hub.payment.domain.PaymentOutcomeListener;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentRepository;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentStatus;
 import dev.lumjahaj.subscription.hub.payment.infra.jpa.PaymentEntity;
@@ -15,6 +16,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
 
 /**
  * The only code that settles money: a payment becomes SUCCEEDED or FAILED,
@@ -37,10 +40,21 @@ public class PaymentSettlementService implements PaymentEventHandler {
 
     private final PaymentRepository payments;
     private final InvoiceRepository invoices;
+    private final List<PaymentOutcomeListener> listeners;
 
-    public PaymentSettlementService(PaymentRepository payments, InvoiceRepository invoices) {
+    /**
+     * The listener list is injected rather than a single collaborator, and
+     * may be empty: the payment module works on its own, and dunning is one
+     * optional reaction to an outcome rather than part of settling it.
+     */
+    public PaymentSettlementService(
+            PaymentRepository payments,
+            InvoiceRepository invoices,
+            List<PaymentOutcomeListener> listeners
+    ) {
         this.payments = payments;
         this.invoices = invoices;
+        this.listeners = listeners;
     }
 
     /**
@@ -99,6 +113,21 @@ public class PaymentSettlementService implements PaymentEventHandler {
             }
         }
         payments.save(payment);
+
+        // After the payment is saved, and inside the same transaction: a
+        // listener reacting to an outcome that then rolls back would leave a
+        // subscription past due for a payment that never failed.
+        notifyListeners(payment, event);
+    }
+
+    private void notifyListeners(PaymentEntity payment, PaymentEvent event) {
+        UUID invoiceId = payment.getInvoice().getId();
+        for (PaymentOutcomeListener listener : listeners) {
+            switch (event.outcome()) {
+                case SUCCEEDED -> listener.onPaymentSucceeded(invoiceId);
+                case FAILED -> listener.onPaymentFailed(invoiceId, event.failureCode());
+            }
+        }
     }
 
     private void markInvoicePaid(InvoiceEntity invoice, PaymentEntity payment) {

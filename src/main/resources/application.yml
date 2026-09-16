@@ -56,6 +56,20 @@ payment:
   # stripe: the real API, which additionally needs stripe.secret-key below.
   provider: fake
 
+dunning:
+  cycle:
+    # Offset from billing.cycle.cron so collection never runs while the
+    # billing cycle is mid-invoice for the same subscription.
+    cron: "0 15 * * * *"
+  # Gaps after a failed attempt, lengthening: a card declined an hour ago is
+  # unlikely to work now, while the same card next week might. The first
+  # attempt happens as soon as the invoice is issued, so these are retries.
+  retry-delays: 1d,3d,5d
+  # Total attempts before the invoice is written off UNCOLLECTIBLE and the
+  # subscription canceled. Each attempt costs a provider fee and irritates
+  # the customer's bank, so this is deliberately finite.
+  max-attempts: 4
+
 stripe:
   # Only read when payment.provider=stripe; StripeConfig then refuses to
   # start if the key is blank. Empty defaults so the application still boots

@@ -64,6 +64,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ActiveProfiles("dev")
 @TestPropertySource(properties = {
         "billing.cycle.cron=-",
+        // Same reason as billing.cycle.cron: DunningJob is invoked directly
+        // by its test, and a scheduled run firing mid-assertion would charge
+        // an invoice another test is in the middle of checking.
+        "dunning.cycle.cron=-",
         // JwtConfig resolves this eagerly and rejects anything under 32
         // bytes, so without it every context fails to build - the same
         // trap billing.pdf.* hit. A fixed test secret also keeps tokens

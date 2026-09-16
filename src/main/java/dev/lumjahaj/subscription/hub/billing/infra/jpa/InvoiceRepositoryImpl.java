@@ -1,11 +1,13 @@
 package dev.lumjahaj.subscription.hub.billing.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
+import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -37,6 +39,11 @@ public class InvoiceRepositoryImpl implements InvoiceRepository {
     @Override
     public Page<InvoiceEntity> findByTenantId(String tenantId, Pageable pageable) {
         return jpaRepository.findByTenantId(tenantId, pageable);
+    }
+
+    @Override
+    public List<InvoiceEntity> findByTenantIdAndStatus(String tenantId, InvoiceStatus status) {
+        return jpaRepository.findByTenantIdAndStatus(tenantId, status);
     }
 
     @Override

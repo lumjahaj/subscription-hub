@@ -29,7 +29,7 @@ class ArchitectureTest {
     static final String BASE = "dev.lumjahaj.subscription.hub";
 
     private static final List<String> FEATURE_MODULES =
-            List.of("auth", "tenancy", "catalog", "customer", "subscription", "usage", "billing", "payment");
+            List.of("auth", "tenancy", "catalog", "customer", "subscription", "usage", "billing", "payment", "dunning");
 
     // Layer patterns are anchored to BASE so a third-party package that happens
     // to contain ".api." or ".infra." can never match as a dependency target.

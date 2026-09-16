@@ -1,0 +1,160 @@
+### --- DUNNING ---
+### Dunning has no endpoints of its own: it is a scheduled job
+### (dunning.cycle.cron, hourly at :15). What it does is visible through the
+### invoice, its payments, and the subscription's status.
+###
+### The pieces you drive by hand are below: storing the payment method the
+### job charges, and watching what each state looks like afterwards.
+###
+### To see a full cycle without waiting days:
+###   1. store pm_card_visa_chargeDeclined for a customer (below)
+###   2. create a subscription and force its period closed in psql, then
+###      generate an invoice (see billing.http)
+###   3. temporarily set dunning.cycle.cron to "*/20 * * * * *" and restart,
+###      or just wait for the top-of-hour run
+###   4. after the first run: the subscription is PAST_DUE and the invoice
+###      still OPEN, with one FAILED payment
+###   5. the retry is a day out, so to see attempt 2 immediately:
+###        UPDATE dunning_state SET next_attempt_at = now() - interval '1 minute';
+###   6. repeat until attempt 4: the invoice becomes UNCOLLECTIBLE and the
+###      subscription CANCELED
+###   7. or switch the stored method to pm_card_visa before a retry: the
+###      invoice goes PAID and the subscription back to ACTIVE
+
+
+### Auth — acme admin
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth — acme support (read-only role)
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "support@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("supportToken", response.body.token);
+%}
+
+### Auth — demo admin, for the isolation check
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+
+### Setup — a customer to collect from. Capture the id.
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "email": "dunning-demo@acme.test",
+  "name": "Dunning Demo Customer"
+}
+
+> {%
+    client.global.set("dunningCustomerId", response.body.id);
+%}
+
+
+### Store a payment method — a card that always declines, so the next
+### billing cycle puts this customer into dunning
+### (expects 200 and "hasDefaultPaymentMethod": true; the token itself is
+### never echoed back)
+PUT {{baseUrl}}/api/customers/{{dunningCustomerId}}/payment-method
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "paymentMethod": "pm_card_visa_chargeDeclined"
+}
+
+### Store a payment method — blank (expects 400 VALIDATION_ERROR)
+PUT {{baseUrl}}/api/customers/{{dunningCustomerId}}/payment-method
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "paymentMethod": ""
+}
+
+### Store a payment method — support role (expects 403 ACCESS_DENIED)
+PUT {{baseUrl}}/api/customers/{{dunningCustomerId}}/payment-method
+Content-Type: application/json
+Authorization: Bearer {{supportToken}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Store a payment method — tenant isolation: acme's customer under demo
+### (expects 404 CUSTOMER_NOT_FOUND)
+PUT {{baseUrl}}/api/customers/{{dunningCustomerId}}/payment-method
+Content-Type: application/json
+Authorization: Bearer {{demoToken}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### The customer — expects "hasDefaultPaymentMethod": true and no token
+GET {{baseUrl}}/api/customers/{{dunningCustomerId}}
+Authorization: Bearer {{acmeToken}}
+
+### Fix the card — what a customer does after a decline. The next dunning
+### attempt then succeeds and the subscription recovers.
+PUT {{baseUrl}}/api/customers/{{dunningCustomerId}}/payment-method
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Remove the stored method — this customer is then never charged
+### automatically; their invoices stay OPEN for a human to collect
+### (expects 200 and "hasDefaultPaymentMethod": false; calling it twice is
+### not an error, because it clears a field rather than deleting a row)
+DELETE {{baseUrl}}/api/customers/{{dunningCustomerId}}/payment-method
+Authorization: Bearer {{acmeToken}}
+
+
+### --- Watching the job's effects ---
+### Requires {{billingInvoiceId}} and {{billingSubId}} from billing.http.
+
+### The invoice — OPEN while dunning retries, PAID once a retry lands,
+### UNCOLLECTIBLE once the attempts run out
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
+Authorization: Bearer {{acmeToken}}
+
+### Its payments — one FAILED row per attempt, each with its failureCode
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Authorization: Bearer {{acmeToken}}
+
+### The subscription — ACTIVE, then PAST_DUE after the first failure, then
+### either ACTIVE again or CANCELED
+GET {{baseUrl}}/api/subscriptions/{{billingSubId}}
+Authorization: Bearer {{acmeToken}}

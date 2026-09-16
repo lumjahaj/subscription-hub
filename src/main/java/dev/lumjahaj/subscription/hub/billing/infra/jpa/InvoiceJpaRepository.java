@@ -7,7 +7,10 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
+
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -20,6 +23,8 @@ public interface InvoiceJpaRepository extends JpaRepository<InvoiceEntity, UUID>
             String tenantId, UUID subscriptionId, Instant periodStart);
 
     Page<InvoiceEntity> findByTenantId(String tenantId, Pageable pageable);
+
+    List<InvoiceEntity> findByTenantIdAndStatus(String tenantId, InvoiceStatus status);
 
     Page<InvoiceEntity> findByTenantIdAndSubscriptionId(String tenantId, UUID subscriptionId, Pageable pageable);
 
