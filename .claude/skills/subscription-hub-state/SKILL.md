@@ -348,6 +348,55 @@ description: What is built in Subscription Hub, why each decision was made, and 
     `whsec_` secret — verification is HMAC, so the production path runs unchanged.
     This is why the Stripe adapter has CI coverage that a real-account integration
     could never have.
+- **Dunning** — `dunning/` module (`app`, `domain`, `infra/jpa`; no `api` — it is a
+  job, not endpoints) plus `customer.default_payment_method` (V12) and
+  `dunning_state` (V13). Closes the three things payments deliberately left:
+  nothing charged automatically, `PAST_DUE` was never set, `UNCOLLECTIBLE` was
+  unreachable.
+  - **Its shape is dictated by asynchronous settlement.** "Charge, then decide
+    whether to renew" is impossible when the outcome arrives by webhook after
+    the run ends, so `BillingCycleJob` was left *completely untouched* and
+    `DunningJob` reacts to state instead: any invoice still `OPEN` whose
+    `next_attempt_at` has passed. The job starts attempts and never reads a
+    result; `PaymentSettlementService` notifies `PaymentOutcomeListener`, and
+    `DunningService` decides what an outcome means. Three responsibilities, three
+    classes, because the middle one is the only place an outcome is known.
+  - **It is its own module out of necessity, not taste.** `billing` cannot depend
+    on `payment` (payment already depends on billing; ArchUnit's no-cycle rule
+    catches it), and putting subscription-lifecycle rules in `payment` would give
+    that module opinions about a concept it has no business knowing. The listener
+    port lives in `payment/domain` and is implemented in `dunning/app`, so the
+    dependency arrow still points dunning → payment.
+  - **`dunning_state` is a separate table**, not columns on `invoice`: an invoice
+    is immutable once issued, and a retry schedule is operational state, not part
+    of a financial document. It is deleted when the invoice settles; the payments
+    remain as the record of what was tried.
+  - **The attempt is counted and committed before the provider is called.** The
+    reverse order looks tidier and is a trap: a crash mid-attempt would leave the
+    invoice due again immediately, which on an hourly cron means charging the
+    customer every hour. The cost of this ordering is one wasted retry after a
+    crash, which is the cheaper mistake. The key is
+    `dunning:{invoiceId}:{attempt}`, so a repeated run resumes the same attempt
+    at the provider rather than charging twice.
+  - **Transitions**: first failure → `PAST_DUE` (but never from `PAUSED` or
+    `CANCELED` — pausing is a deliberate customer choice). A successful retry
+    deletes the schedule and returns the subscription to `ACTIVE`; the next
+    `BillingCycleJob` run then renews it through the existing
+    already-invoiced path, so nothing new was needed for recovery. After
+    `dunning.max-attempts` the invoice is `UNCOLLECTIBLE` and the subscription
+    `CANCELED` — which is what finally makes both of those enum values reachable.
+  - **Skips are deliberate and logged, not silent**: an invoice with a `PENDING`
+    payment (an awaited webhook is not a failure, and the in-flight index would
+    reject the attempt anyway), and a customer with no stored payment method
+    (left `OPEN` for a human rather than invented behaviour — see the gaps below).
+  - `DunningSchedule` is pure and unit-tested as a table of attempt → delay, the
+    same split `applyRenewal` and `InvoiceCalculator` use. Defaults: retries after
+    1d, 3d, 5d, four attempts total.
+  - Verified live as well as in tests: with the cron shortened, a declining card
+    produced `PAST_DUE` on the first run, no attempt on the second (the schedule
+    genuinely holds), attempt 2 after forcing it due, then
+    `UNCOLLECTIBLE`/`CANCELED` at the limit, and `PAID`/`ACTIVE` when the card was
+    fixed mid-cycle.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -388,6 +437,7 @@ POST GET      /api/subscriptions/{subscriptionId}/invoices
 GET            /api/invoices[?subscriptionId=]
 GET            /api/invoices/{id}
 POST GET      /api/invoices/{id}/pdf
+PUT DELETE    /api/customers/{id}/payment-method
 POST GET      /api/invoices/{id}/payments   (POST needs an Idempotency-Key header)
 GET            /api/payments/{id}
 POST          /api/webhooks/stripe          (public; authenticated by signature)
@@ -519,6 +569,8 @@ feature module does.
 
 **Payments**
 
+- ~~Nothing charges automatically~~ — closed by dunning (see Current state), along
+  with the missing stored payment method.
 - **A stuck `PENDING` payment blocks its invoice, and nothing cleans it up.** If
   the provider is unreachable (or the app dies between the reserve and the
   provider call), the payment stays `PENDING` and the partial unique index refuses
@@ -545,6 +597,32 @@ feature module does.
 - **No webhook endpoint for anything but payments**, and no event replay tooling:
   if the app is down for longer than the provider's retry window, those events are
   simply lost, and only the reconciliation job above would notice.
+
+**Dunning**
+
+- **A customer with no stored payment method is never chased.** Their invoices
+  stay `OPEN` forever, no dunning row is created, and nothing escalates. A real
+  system would email them, or eventually write the invoice off; both need
+  notifications, which is the next roadmap line.
+- **Nobody is told anything.** No email on a failed payment, on the final
+  cancellation, or on recovery — the customer's service simply stops. That is the
+  single biggest gap in this module and is deliberate: notifications come next,
+  and the invoice PDF already exists to attach to them.
+- **One dunning policy for every tenant.** The delays and attempt count are
+  application config, not per-tenant or per-plan, so a tenant selling €5/month
+  cannot retry differently from one selling €5,000/month. Making it per-tenant is
+  a schema change and a policy-resolution step, not a config tweak.
+- **The final cancellation is immediate and unrecoverable through the API.**
+  `CANCELED` has no transition back, so a customer who pays after the cycle ends
+  needs a new subscription. A grace period, or a reactivation endpoint, is the
+  obvious next refinement.
+- **`DunningJob` scans every `OPEN` invoice per tenant on each run**, rather than
+  querying only rows whose `next_attempt_at` is due. The set is bounded (an
+  invoice is eventually paid or written off) and the check is cheap, but a
+  tenant with many uncollected invoices does more work per tick than it needs to.
+- **No metrics.** How many invoices are in dunning, how many recover, and at which
+  attempt, are exactly the numbers a billing team would ask for first, and there
+  is nowhere to read them but the database. Waiting on the observability line.
 
 **Authentication and authorization**
 

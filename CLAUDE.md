@@ -96,6 +96,7 @@ subscription/    api, app, domain, infra/jpa
 usage/           api, app, domain, infra/jpa
 billing/         api, app, domain, infra/{jpa, pdf, storage}
 payment/         api, app, domain, infra/{jpa, gateway}
+dunning/         app, domain, infra/jpa  (no api — it is a job, not endpoints)
 audit/           (not built)
 ```
 
@@ -375,6 +376,30 @@ Full reasoning under Current state in the subscription-hub-state skill.
   payment at the provider, so the adapter records the reference and lets the
   event settle it FAILED; only an unreachable provider leaves a payment PENDING.
 
+**Dunning invariants** — collection is automatic, so the failure modes are
+unattended ones.
+- **The job only *starts* attempts; it never reads whether one worked.** It
+  cannot: settlement is asynchronous, so with a real provider nothing is known
+  when the run ends. `PaymentSettlementService` notifies
+  `PaymentOutcomeListener`, and `DunningService` decides what the outcome means.
+  Anything that makes the job branch on a result is a bug in disguise.
+- **`dunning/` is its own module because it must be.** `billing` may not depend
+  on `payment` (payment already depends on billing, and ArchUnit forbids the
+  cycle), and subscription-lifecycle rules do not belong in `payment`.
+- **The attempt is counted and committed before the provider is called**, so a
+  crash costs one retry rather than leaving the invoice due again immediately —
+  which on an hourly cron means charging the customer every hour. The
+  idempotency key is `dunning:{invoiceId}:{attempt}`, so a repeat resumes.
+- **`PAUSED` and `CANCELED` are never dragged to `PAST_DUE`.** Pausing is a
+  deliberate customer choice; non-payment must not silently overwrite it.
+- **Dunning ends.** After `dunning.max-attempts` the invoice is `UNCOLLECTIBLE`
+  and the subscription `CANCELED`: each attempt costs a provider fee and annoys
+  the customer's bank, so retrying forever is not a kindness.
+- **A six-field cron cannot be passed through `-Dspring-boot.run.arguments`** —
+  Maven splits it on spaces and Boot rejects `*/20` as a one-field expression.
+  Use the environment variable (`DUNNING_CYCLE_CRON="*/20 * * * * *"`) when
+  shortening a schedule to watch a job run locally.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
 
@@ -412,7 +437,8 @@ happy path, validation failures, conflict/not-found, and **tenant isolation**
 tenant (id varchar(64) PK — slug)
  ├── app_user            (unique tenant_id + email; bcrypt password_hash)
  │    └── app_user_role  (user_id + role; CHECK against the four Role values)
- ├── customer            (unique tenant_id + email)
+ ├── customer            (unique tenant_id + email; default_payment_method nullable, V12 —
+ │                        a provider token, never card data)
  ├── product             (unique tenant_id + code)
  │    └── plan           (unique tenant_id + code; interval_unit, interval_count, amount_cents, currency, trial_days)
  │         └── plan_entitlement   (unique tenant_id + plan_id + key; value_json jsonb)
@@ -422,9 +448,12 @@ tenant (id varchar(64) PK — slug)
  ├── invoice → invoice_line   (unique tenant_id + subscription_id + period_start; period_start/end added in V6;
  │        │                     pdf_object_key nullable — renamed from pdf_url in V7, holds an object key not a URL;
  │        │                     paid_at added in V11)
- │        └── payment      (V11; unique tenant_id + idempotency_key, plus the partial unique index
- │                          ux_payment_invoice_in_flight_or_succeeded on (tenant_id, invoice_id)
- │                          WHERE status IN ('PENDING','SUCCEEDED') — one charge per invoice)
+ │        ├── payment      (V11; unique tenant_id + idempotency_key, plus the partial unique index
+ │        │                 ux_payment_invoice_in_flight_or_succeeded on (tenant_id, invoice_id)
+ │        │                 WHERE status IN ('PENDING','SUCCEEDED') — one charge per invoice)
+ │        └── dunning_state (V13; unique tenant_id + invoice_id — retry schedule, deleted once
+ │                          the invoice settles; separate from invoice because an invoice is
+ │                          immutable once issued)
  └── audit_event
 
 invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
@@ -445,10 +474,11 @@ Seeded tenants for local dev: `acme`, `demo`.
 
 Subscription state transitions (cancel/pause/resume), renewal processing,
 usage metering, billing/invoice calculation, invoice PDFs (MinIO),
-JWT authentication + RBAC, and payments (fake + Stripe adapters, webhook
-settlement) are done — see the subscription-hub-state skill.
+JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
+settlement) and dunning (automatic collection, retries, `PAST_DUE` →
+`UNCOLLECTIBLE`/`CANCELED`) are done — see the subscription-hub-state skill.
 
-Next: Dunning (`PAST_DUE`) → Notifications (MailHog — the PDF
+Next: Notifications (MailHog — the PDF
 is the attachment, which is why it came first) →
 **Tenant provisioning (platform-admin API)** → Audit events → Observability
 (Actuator, Micrometer, Prometheus, Grafana).

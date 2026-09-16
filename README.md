@@ -40,7 +40,13 @@ tenants (SaaS customers) from one deployment:
   created `PENDING` and settled only by a provider event (a webhook, for
   Stripe), so both providers share one settlement path and one set of rules.
 
-Dunning, notifications, tenant provisioning and audit logging are on the roadmap
+- **Dunning** collects automatically. A customer's stored payment method is
+  charged once an invoice is issued; a failure marks the subscription
+  `PAST_DUE` and schedules a retry on a lengthening backoff. A later success
+  puts the subscription back to `ACTIVE`; running out of attempts writes the
+  invoice off as `UNCOLLECTIBLE` and cancels the subscription.
+
+Notifications, tenant provisioning and audit logging are on the roadmap
 but not yet built — see [`CLAUDE.md`](CLAUDE.md) for the architecture and
 conventions, and the state skill linked at the bottom for the detailed current
 state and an honest list of what's deliberately missing.
@@ -62,6 +68,7 @@ subscription/    Subscription, renewal
 usage/           metered usage counters
 billing/         Invoice, invoice lines, PDF rendering and storage
 payment/         provider port, fake + Stripe adapters, webhook settlement
+dunning/         automatic collection, retry schedule, PAST_DUE lifecycle
 ```
 
 Each feature module follows `api → app → domain ← infra`:
@@ -124,6 +131,16 @@ free, so three things are deliberate:
 A caller must send an `Idempotency-Key`; it replays the first result rather than
 charging twice, and it is the only way to resume a payment the provider never
 acknowledged.
+
+**Dunning** builds on that. `DunningJob` charges invoices that are still open,
+using the payment method stored on the customer, and stops at a configured
+number of attempts. It is a separate job from the billing cycle for one
+concrete reason: settlement is asynchronous, so "charge, then decide whether to
+renew" would depend on a webhook that arrives long after the run has finished.
+The job therefore only *starts* attempts and never reads their result — the
+settlement path reports the outcome, and dunning decides what it means for the
+subscription. Attempts are counted before the provider is called, so a crash
+costs one retry instead of re-charging the customer on every tick.
 
 ### Error handling
 
@@ -256,6 +273,25 @@ requests work against either provider: `pm_card_visa` succeeds,
 `pm_card_visa_chargeDeclined` is declined, and the fake-only
 `pm_fake_provider_unavailable` simulates an unreachable provider.
 
+For automatic collection, store a method on the customer instead — the token is
+kept but never returned, so the response reports `hasDefaultPaymentMethod`:
+
+```
+PUT /api/customers/{id}/payment-method
+{ "paymentMethod": "pm_card_visa_chargeDeclined" }
+```
+
+Dunning then runs hourly. To watch a full cycle without waiting, shorten its
+schedule with an environment variable and restart:
+
+```bash
+DUNNING_CYCLE_CRON="*/20 * * * * *" ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+```
+
+Pass it as an environment variable, not `-Dspring-boot.run.arguments`: Maven
+splits the six-field expression on spaces and the application refuses to start.
+`requests/dunning.http` walks through the states from there.
+
 Example request files covering happy paths, validation errors,
 conflict/not-found, role denials, and tenant-isolation checks live in
 [`requests/`](requests/) (IntelliJ HTTP Client format).
@@ -272,8 +308,8 @@ This is also what runs in CI on every push/PR to `main` (see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Integration tests
 provision their own Postgres, MinIO and stripe-mock via Testcontainers, so
 nothing needs to be running first — invoice totals, tenant isolation, PDF round
-trips, concurrent charge attempts and signed webhook settlement are all verified
-against the real thing rather than mocks.
+trips, concurrent charge attempts, signed webhook settlement and the whole
+dunning lifecycle are all verified against the real thing rather than mocks.
 
 ---
 

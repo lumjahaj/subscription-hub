@@ -10,8 +10,10 @@
 ###   1. store pm_card_visa_chargeDeclined for a customer (below)
 ###   2. create a subscription and force its period closed in psql, then
 ###      generate an invoice (see billing.http)
-###   3. temporarily set dunning.cycle.cron to "*/20 * * * * *" and restart,
-###      or just wait for the top-of-hour run
+###   3. restart with DUNNING_CYCLE_CRON="*/20 * * * * *" as an environment
+###      variable (NOT -Dspring-boot.run.arguments: Maven splits the six
+###      fields on spaces and the app then refuses to start), or just wait
+###      for the top-of-hour run
 ###   4. after the first run: the subscription is PAST_DUE and the invoice
 ###      still OPEN, with one FAILED payment
 ###   5. the retry is a day out, so to see attempt 2 immediately:
