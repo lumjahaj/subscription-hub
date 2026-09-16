@@ -22,14 +22,11 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.UUID;
 
+import static dev.lumjahaj.subscription.hub.testsupport.StripeTestSignatures.sign;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -51,8 +48,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 class StripeWebhookIntegrationTest extends AbstractIntegrationTest {
 
     private static final String TENANT = "acme";
-    /** Must match AbstractIntegrationTest's stripe.webhook-secret. */
-    private static final String SECRET = "whsec_test_only_webhook_signing_secret";
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -231,22 +226,6 @@ class StripeWebhookIntegrationTest extends AbstractIntegrationTest {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         return headers;
-    }
-
-    private static String sign(String payload) {
-        return sign(payload, Instant.now().getEpochSecond());
-    }
-
-    /** Stripe's scheme: HMAC-SHA256 over "<timestamp>.<raw body>", hex encoded. */
-    private static String sign(String payload, long timestamp) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] signature = mac.doFinal((timestamp + "." + payload).getBytes(StandardCharsets.UTF_8));
-            return "t=" + timestamp + ",v1=" + HexFormat.of().formatHex(signature);
-        } catch (Exception ex) {
-            throw new IllegalStateException("Could not sign the test payload", ex);
-        }
     }
 
     // ---- fixtures ----

@@ -3,12 +3,14 @@ package dev.lumjahaj.subscription.hub.tenancy;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenRequest;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenResponse;
 import dev.lumjahaj.subscription.hub.billing.api.dto.InvoiceResponse;
+import dev.lumjahaj.subscription.hub.billing.app.BillingCycleJob;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanResponse;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductResponse;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerCreateRequest;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerResponse;
+import dev.lumjahaj.subscription.hub.dunning.app.DunningJob;
 import dev.lumjahaj.subscription.hub.notification.app.NotificationDeliveryService;
 import dev.lumjahaj.subscription.hub.notification.app.NotificationRelayJob;
 import dev.lumjahaj.subscription.hub.platform.api.dto.TenantCreateRequest;
@@ -17,6 +19,7 @@ import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionCreateRequ
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionResponse;
 import dev.lumjahaj.subscription.hub.testsupport.AbstractIntegrationTest;
 import dev.lumjahaj.subscription.hub.testsupport.MailpitTestClient;
+import dev.lumjahaj.subscription.hub.testsupport.StripeTestSignatures;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +28,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -47,6 +51,12 @@ import static org.awaitility.Awaitility.await;
 class TenantDeactivationPolicyIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
+    private BillingCycleJob billingCycleJob;
+
+    @Autowired
+    private DunningJob dunningJob;
+
+    @Autowired
     private NotificationDeliveryService deliveryService;
 
     @Autowired
@@ -60,6 +70,7 @@ class TenantDeactivationPolicyIntegrationTest extends AbstractIntegrationTest {
     private String tenantId;
     private HttpHeaders tenantAdmin;
     private String customerEmail;
+    private UUID customerId;
 
     @BeforeEach
     void provisionTenant() {
@@ -80,6 +91,77 @@ class TenantDeactivationPolicyIntegrationTest extends AbstractIntegrationTest {
         tenantAdmin = new HttpHeaders();
         tenantAdmin.setBearerAuth(login.getBody().token());
     }
+
+    // ---- billing ----
+
+    @Test
+    void aDueSubscription_isNeitherInvoicedNorRenewedWhileInactive_andCatchesUpOnReactivation() {
+        UUID subscriptionId = createActiveSubscription();
+        forcePeriodDue(subscriptionId);
+        Instant dueAt = nextRenewal(subscriptionId);
+        setActive(false);
+
+        billingCycleJob.run();
+
+        assertThat(invoiceCount(subscriptionId)).isZero();
+        assertThat(nextRenewal(subscriptionId)).isEqualTo(dueAt);
+
+        // Not forgiven: the period is still owed and is billed once the tenant
+        // is back. Waiving it is the tenant's decision, not the platform's.
+        setActive(true);
+        billingCycleJob.run();
+
+        assertThat(invoiceCount(subscriptionId)).isEqualTo(1);
+        assertThat(nextRenewal(subscriptionId)).isAfter(dueAt);
+    }
+
+    // ---- dunning ----
+
+    @Test
+    void anOpenInvoice_isNotChargedWhileInactive_andIsChargedOnReactivation() {
+        UUID subscriptionId = createActiveSubscription();
+        storePaymentMethod("pm_card_visa");
+        forcePeriodDue(subscriptionId);
+        UUID invoiceId = generateInvoice(subscriptionId);
+        setActive(false);
+
+        dunningJob.run();
+
+        assertThat(paymentCount(invoiceId)).isZero();
+        assertThat(invoiceStatus(invoiceId)).isEqualTo("OPEN");
+
+        setActive(true);
+        dunningJob.run();
+
+        assertThat(paymentCount(invoiceId)).isEqualTo(1);
+        assertThat(invoiceStatus(invoiceId)).isEqualTo("PAID");
+    }
+
+    // ---- provider events ----
+
+    @Test
+    void aProviderEvent_stillSettlesWhileInactive() {
+        // The money already moved at the provider. Refusing to record it would
+        // not undo the charge, only make our books disagree with Stripe's.
+        UUID subscriptionId = createActiveSubscription();
+        forcePeriodDue(subscriptionId);
+        UUID invoiceId = generateInvoice(subscriptionId);
+        UUID paymentId = insertPendingStripePayment(invoiceId);
+        setActive(false);
+
+        String payload = succeededEvent(paymentId);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Stripe-Signature", StripeTestSignatures.sign(payload));
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/webhooks/stripe", HttpMethod.POST, new HttpEntity<>(payload, headers), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(paymentStatus(paymentId)).isEqualTo("SUCCEEDED");
+        assertThat(invoiceStatus(invoiceId)).isEqualTo("PAID");
+    }
+
+    // ---- notifications ----
 
     @Test
     void anEmailAlreadyOnTheQueue_isHeldWhileTheTenantIsInactive_andSentOnceAfterReactivation() {
@@ -130,7 +212,6 @@ class TenantDeactivationPolicyIntegrationTest extends AbstractIntegrationTest {
         TenantContext.runAs(tenantId, () -> deliveryService.deliver(notificationId));
 
         assertThat(notificationStatus(notificationId)).isEqualTo("SENT");
-        setActive(true);
     }
 
     // ---- platform actions ----
@@ -162,6 +243,31 @@ class TenantDeactivationPolicyIntegrationTest extends AbstractIntegrationTest {
                 .count();
     }
 
+    private int invoiceCount(UUID subscriptionId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM invoice WHERE subscription_id = ?", Integer.class, subscriptionId);
+    }
+
+    private Instant nextRenewal(UUID subscriptionId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT next_renewal FROM subscription WHERE id = ?", Timestamp.class, subscriptionId).toInstant();
+    }
+
+    private int paymentCount(UUID invoiceId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM payment WHERE invoice_id = ?", Integer.class, invoiceId);
+    }
+
+    private String paymentStatus(UUID paymentId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT status::text FROM payment WHERE id = ?", String.class, paymentId);
+    }
+
+    private String invoiceStatus(UUID invoiceId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT status::text FROM invoice WHERE id = ?", String.class, invoiceId);
+    }
+
     private UUID notificationIdFor(String dedupKey) {
         return jdbcTemplate.queryForObject(
                 "SELECT id FROM notification WHERE tenant_id = ? AND dedup_key = ?", UUID.class, tenantId, dedupKey);
@@ -178,7 +284,46 @@ class TenantDeactivationPolicyIntegrationTest extends AbstractIntegrationTest {
                 Timestamp.from(closedPeriodEnd), Timestamp.from(closedPeriodEnd), subscriptionId);
     }
 
-    // ---- fixtures (over HTTP, as the new tenant's admin) ----
+    // ---- fixtures ----
+
+    /**
+     * Inserted directly, as StripeWebhookIntegrationTest does: the configured
+     * provider is the fake, so the API cannot create a Stripe payment.
+     */
+    private UUID insertPendingStripePayment(UUID invoiceId) {
+        UUID paymentId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                        INSERT INTO payment (id, tenant_id, invoice_id, amount_cents, currency, status,
+                                             provider, payment_method, idempotency_key, created_at, updated_at)
+                        SELECT ?, tenant_id, id, total_cents, currency, 'PENDING'::payment_status,
+                               'stripe', 'pm_card_visa', ?, now(), now()
+                        FROM invoice WHERE id = ?
+                        """,
+                paymentId, "deactivation-test-" + paymentId, invoiceId);
+        return paymentId;
+    }
+
+    private String succeededEvent(UUID paymentId) {
+        return """
+                {"id":"evt_%s","object":"event","api_version":"2024-06-20","created":%d,
+                 "type":"payment_intent.succeeded",
+                 "data":{"object":{"id":"pi_%s","object":"payment_intent","amount":2999,"currency":"usd",
+                 "status":"succeeded","metadata":{"tenant_id":"%s","payment_id":"%s"}}}}
+                """.formatted(paymentId, Instant.now().getEpochSecond(), paymentId, tenantId, paymentId);
+    }
+
+    // Over HTTP as the new tenant's admin, so these go through the same
+    // authentication and tenant resolution a real client does.
+
+    private void storePaymentMethod(String paymentMethod) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.addAll(tenantAdmin);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/customers/" + customerId + "/payment-method", HttpMethod.PUT,
+                new HttpEntity<>("{\"paymentMethod\":\"" + paymentMethod + "\"}", headers), String.class);
+        assertThat(response.getStatusCode().is2xxSuccessful()).as(response.getBody()).isTrue();
+    }
 
     private UUID generateInvoice(UUID subscriptionId) {
         ResponseEntity<InvoiceResponse> response = restTemplate.exchange(
@@ -207,15 +352,14 @@ class TenantDeactivationPolicyIntegrationTest extends AbstractIntegrationTest {
 
         ResponseEntity<CustomerResponse> customer = restTemplate.exchange(
                 "/api/customers", HttpMethod.POST,
-                new HttpEntity<>(new CustomerCreateRequest(null, customerEmail, "Customer"),
-                        tenantAdmin),
+                new HttpEntity<>(new CustomerCreateRequest(null, customerEmail, "Customer"), tenantAdmin),
                 CustomerResponse.class);
         assertThat(customer.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        customerId = customer.getBody().id();
 
         ResponseEntity<SubscriptionResponse> subscription = restTemplate.exchange(
                 "/api/subscriptions", HttpMethod.POST,
-                new HttpEntity<>(new SubscriptionCreateRequest(customer.getBody().id(), plan.getBody().code()),
-                        tenantAdmin),
+                new HttpEntity<>(new SubscriptionCreateRequest(customerId, plan.getBody().code()), tenantAdmin),
                 SubscriptionResponse.class);
         assertThat(subscription.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         return subscription.getBody().id();
