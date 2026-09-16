@@ -19,6 +19,9 @@ tenants (SaaS customers) from one deployment:
   tenant-owned row is isolated by a `tenant_id` column.
 - **Authentication** issues signed tokens carrying the caller's tenant and roles,
   with role-based rules on every write endpoint.
+- **Tenant provisioning** is a platform-admin API: a platform administrator,
+  whose token names no tenant, creates a tenant together with its first admin
+  (a generated password, returned once), and can deactivate or reactivate it.
 - **Catalog** — tenants define `Product`s, each with one or more `Plan`s
   (interval, price in cents, currency, trial length), and optional
   `PlanEntitlement`s (feature flags/limits attached to a plan).
@@ -53,7 +56,7 @@ tenants (SaaS customers) from one deployment:
   Mailpit — both stand in for their real counterparts (SQS, Amazon SES) the
   same way MinIO stands in for S3.
 
-Tenant provisioning and audit logging are on the roadmap but not yet built —
+Audit logging and observability are on the roadmap but not yet built —
 see [`CLAUDE.md`](CLAUDE.md) for the architecture and conventions, and the
 state skill linked at the bottom for the detailed current state and an
 honest list of what's deliberately missing.
@@ -303,6 +306,15 @@ signed claim is what closes that.
 No token returns `401 UNAUTHENTICATED`; an authenticated caller lacking the
 required role returns `403 ACCESS_DENIED`.
 
+**Platform administrators** are the one principal outside any tenant. They log
+in at `POST /api/platform/auth/token` against a separate `platform_user` table,
+and their token carries `roles=["PLATFORM_ADMIN"]` and no `tenant_id` at all.
+The two kinds of token cannot stand in for each other: `/api/platform/**`
+requires `PLATFORM_ADMIN`, so a tenant ADMIN gets `403`, and every tenant
+endpoint requires a `tenant_id` claim, so a platform token gets `403` too.
+Deactivating a tenant takes effect on its next request, even for tokens already
+issued, because the tenant's `active` flag is re-checked on every request.
+
 ### Payments
 
 Charging money is the one place where "retry it" and "roll it back" stop being
@@ -482,6 +494,30 @@ These exist only under the `dev` profile. Reads are open to any authenticated
 role; writes need `ADMIN` (catalog) or `ADMIN`/`BILLING` (customers,
 subscriptions, usage, invoices, payments) — logging in as `support@acme.test` is
 the quickest way to see a `403`.
+
+To create a tenant, log in as the seeded platform administrator
+(`platform@subscriptionhub.test` / `subscriptionhub`, also `dev` profile only):
+
+```bash
+curl -s -X POST http://localhost:8080/api/platform/auth/token \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"platform@subscriptionhub.test","password":"subscriptionhub"}'
+```
+
+```
+POST /api/platform/tenants
+Authorization: Bearer <platform token>
+
+{ "id": "globex", "name": "Globex Corporation", "adminEmail": "admin@globex.test" }
+```
+
+The `201` response contains the new admin's `initialPassword`, the only time it
+is ever shown. `requests/platform.http` walks through the rest: logging in as
+that admin, deactivation and the cross-direction `403`s.
+
+Outside the `dev` profile there is no seeded platform administrator. Set
+`PLATFORM_ADMIN_EMAIL` and `PLATFORM_ADMIN_PASSWORD` (at least 12 characters)
+and the first one is created at startup, only while none exists yet.
 
 Paying an invoice additionally requires an `Idempotency-Key` header:
 

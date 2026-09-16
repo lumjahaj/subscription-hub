@@ -494,6 +494,70 @@ description: What is built in Subscription Hub, why each decision was made, and 
     surfaced. Both `SqsNotificationPublisher` and `SqsNotificationListener`
     now serialize/deserialize the queue payload by hand with `ObjectMapper`
     rather than trust the framework's automatic conversion for a record.
+- **Tenant provisioning** — a platform-level principal (`auth/`) plus a new
+  `platform/` module (`api`, `app`). Closes two gaps at once: there was no way to
+  create a tenant, and no principal that could act across tenants.
+  - **Platform administrators live in `platform_user` (V15)**, not in `app_user`
+    with a nullable `tenant_id`. A nullable tenant turns "forgot to set the
+    tenant" into "is a platform admin", and NULLs never collide in
+    `uk_app_user_tenant_email`. No role table: one role (`PLATFORM_ADMIN`), issued
+    in the `roles` claim so the existing `JwtAuthenticationConverter` maps it
+    unchanged. `PlatformRole` is deliberately not a value of `Role`, which is the
+    tenant vocabulary guarded by `chk_app_user_role_value` — kept apart, a tenant
+    account cannot hold it even by a stray row insert.
+  - **Separate login, `POST /api/platform/auth/token`**, rather than "omit
+    `tenantId` to become a platform admin" on the tenant login. The token has no
+    `tenant_id`. Both logins share `PasswordVerifier` (always hash, one error
+    code) and `TokenIssuer` (issuer, lifetime, subject), extracted from
+    `AuthService` so the enumeration defence exists once rather than as two copies
+    that could drift.
+  - **Two-way isolation in `SecurityConfig`**: `/api/platform/**` requires
+    `PLATFORM_ADMIN`; `anyRequest()` requires a `tenant_id` claim. A platform token
+    on `/api/products` is 403, not the 400 `TENANT_MISSING` it would otherwise
+    reach — `MissingTenantException` is now a backstop no real request hits.
+    `/actuator/**` stays `authenticated()` for either token until Observability.
+  - **`platform/` exists because of a cycle, not taste.** Provisioning writes a
+    tenant and an `app_user`; `auth` already depends on `tenancy`
+    (`AuthService` checks the tenant is active), so the service in `tenancy` would
+    close `tenancy → auth → tenancy`. Same forced shape as `dunning/`. It has no
+    `domain` or `infra`: it owns no data, it orchestrates two modules that do.
+  - **Provisioning creates the tenant and its first ADMIN in one transaction**,
+    with a `SecureRandom` 192-bit base64url password returned once in the 201 and
+    stored only as a bcrypt hash. Generated rather than supplied, so nobody picks a
+    password on a tenant's behalf or sends one in a request body; show-once like an
+    API key. A tenant without an admin would be unusable — there is no
+    user-management API — so a failed user insert must take the tenant with it.
+  - **`TenantRepository.create` uses `EntityManager.persist` + `flush`, not
+    `save`.** The tenant id is an assigned slug, and Spring Data's `save` merges
+    any entity whose id isn't null: a create that raced past the existence check
+    would silently overwrite the other tenant's name. With persist, the duplicate
+    fails on `tenant_pkey`, which `ProblemDetailsAdvice` maps to 409 — the same
+    check-then-constraint pattern as everywhere else, and the first repository
+    adapter that needed more than delegation (the seam the trio exists for). An
+    8-thread concurrent-create test asserts one 201 and seven 409s.
+  - **Slug rule `^[a-z][a-z0-9-]{1,62}$`**: lowercase so `Acme`/`acme` can't be
+    two tenants; no underscores, which also makes the `__no_tenant__` sentinel
+    impossible to provision; safe in a JWT claim, MDC and an object key.
+  - **Deactivate/activate are idempotent POST commands**, not a PATCH of `active`.
+    Deactivation is instant even for issued tokens, because `TenantResolverFilter`
+    already re-checked `active` on every request — this is the first code path
+    that ever exercised that check. Nothing is deleted: every tenant table
+    cascades from `tenant`.
+  - **Bootstrap**: `db/seed/V9002` seeds `platform@subscriptionhub.test` under
+    `dev`; elsewhere `PlatformAdminBootstrap` (`ApplicationRunner`) creates one from
+    `PLATFORM_ADMIN_EMAIL`/`PLATFORM_ADMIN_PASSWORD` **only while `platform_user`
+    is empty**, so the variables are a way in, not a standing credential. Both
+    unset is a no-op; one set, or a password under 12 characters, fails startup.
+    Unit-tested with an in-memory repository, because every test database already
+    holds the seed and the empty-table branch is unreachable there.
+  - Verified live as well as in tests: a provisioned admin logged in with the
+    generated password and created a product; deactivation turned that token into
+    401 `TENANT_UNKNOWN` and activation restored it; the jar started against an
+    empty Postgres without the dev profile created the bootstrap admin. One thing
+    only the live run showed: **Boot accepts HTTP before `ApplicationRunner`s
+    finish**, so a login fired the instant "Started" is logged can 401. Boot's
+    readiness state only flips to accepting traffic after runners, so a deployment
+    gated on the readiness probe never sees it.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -523,6 +587,11 @@ description: What is built in Subscription Hub, why each decision was made, and 
 **Endpoints:**
 ```
 POST          /api/auth/token          (public)
+POST          /api/platform/auth/token (public)
+POST GET      /api/platform/tenants     (PLATFORM_ADMIN)
+GET            /api/platform/tenants/{id}
+POST          /api/platform/tenants/{id}/deactivate
+POST          /api/platform/tenants/{id}/activate
 GET  /api/health                       (public)
 POST GET      /api/products
 GET            /api/products/{code}
@@ -775,11 +844,11 @@ feature module does.
   expires (1h); a stolen one cannot be recalled. Real systems pair a short access
   token with a refresh token and a revocation list, which needs server-side state
   this deliberately doesn't have.
-- **No password reset, no password change, no user management at all.** Users only
-  exist because `db/seed` creates them. There is no endpoint to create one, so the
-  `uk_app_user_tenant_email` constraint is unreachable through the API and is
-  deliberately *not* registered in `ProblemDetailsAdvice`'s constraint map — adding
-  it would be dead code until a user-management endpoint exists.
+- **No password reset, no password change, no user management at all.** A tenant
+  user exists only because `db/seed` created it or tenant provisioning created a
+  new tenant's first admin. Provisioning always inserts into a brand-new tenant,
+  so `uk_app_user_tenant_email` is still unreachable through the API and is still
+  deliberately *not* registered in `ProblemDetailsAdvice`'s constraint map.
 - **No rate limiting on login.** The endpoint is public and does a bcrypt
   verification per call, so it is both brute-forceable and a cheap way to burn CPU.
   The constant-time-ish behaviour (always hashing, one error code) stops
@@ -792,24 +861,49 @@ feature module does.
   read-only. It only becomes different once an `app_user` can be linked to a
   `customer` — "read *your own* subscriptions" — and no schema exists for that
   link. Declared because CLAUDE.md §7 named it, not because it does anything.
-- **No platform-level (cross-tenant) principal.** Every token is bound to a
-  tenant, so "who may read `/actuator/metrics`?" has no clean answer — any tenant's
-  ADMIN would technically qualify. Non-health actuator endpoints stay unexposed to
-  avoid the question; Observability will force it, since Prometheus has to scrape
-  `/actuator/prometheus`.
-- **No way to create a tenant.** `TenantRepository` has only `findActiveById` and
-  `findAllActive` — no `save`, no controller, no CLI. A tenant exists only because
-  `db/seed` or manual SQL made it. Four options were weighed: self-service signup,
-  a platform-admin API, out-of-band tooling, and a payment-provider webhook. A B2B
-  billing backend points at the platform-admin API, since customers here are
-  onboarded through a sales process rather than a signup form (CLAUDE.md §7).
+- ~~No platform-level (cross-tenant) principal~~ — closed by Tenant provisioning
+  (see Current state). **Who may read metrics is still undecided**: `/actuator/**`
+  accepts either kind of token, and non-health endpoints stay unexposed until
+  Observability restricts `/actuator/prometheus` to the platform principal or a
+  dedicated scrape credential.
+- ~~No way to create a tenant~~ — closed by Tenant provisioning. Four options were
+  weighed: self-service signup, a platform-admin API, out-of-band tooling, and a
+  payment-provider webhook. A B2B billing backend points at the platform-admin API,
+  since customers here are onboarded through a sales process rather than a signup
+  form. **There is no admin dashboard**, deliberately: this is a JSON API, and the
+  platform endpoints are what a back-office UI would call — `requests/platform.http`
+  stands in for one.
 - **The seeded `acme`/`demo` tenants still ship in `V1`, in every environment.**
   The seeded *logins* were moved to a profile-gated `db/seed` because their
-  password is public; the tenants stayed, for two reasons. They carry no
-  credentials, and deleting them would be worse than leaving them: all twelve
-  tables referencing `tenant` cascade, so dropping `acme` would take every
-  customer, product, subscription and invoice with it — and with no provisioning
-  API, a deployment stripped of them would have no tenants and no way to get one.
+  password is public; the tenants stayed. They carry no credentials, and all twelve
+  tables referencing `tenant` cascade, so dropping them in a migration would delete
+  their data wherever they had been used. A provisioning API now exists, so a clean
+  deployment no longer *needs* them — they could be deactivated through it rather
+  than deleted.
+
+**Tenant provisioning**
+
+- **The initial password is never forced to change.** There is no password-change
+  endpoint, so the generated password stays the admin's password. Real systems
+  mark it as one-time and require a change on first login.
+- **Losing the initial password has no route back.** It is shown once and there is
+  no reset; an operator would have to reset the hash by hand.
+- **No platform-user management.** Platform admins exist through the seed or the
+  bootstrap variables only. There is no endpoint to add a second one, disable one,
+  or rotate a password, and the bootstrap deliberately never touches an existing
+  row.
+- **No tenant update or delete.** A tenant's name cannot be changed after
+  creation, and deletion is intentionally absent (cascades would destroy
+  financial records); deactivation is the only lifecycle operation.
+- **Deactivation silently pauses a tenant's background work.** `BillingCycleJob`,
+  `DunningJob` and `NotificationRelayJob` all iterate `findAllActive`, so while a
+  tenant is inactive its subscriptions stop renewing, its invoices stop being
+  chased and its queued emails stay `PENDING`; all three resume on reactivation
+  (renewal one period per run, as it always self-heals). A side effect of existing
+  code, not a designed policy — whether an inactive tenant should still bill is a
+  business decision nobody has made.
+- **Provisioning is not audited.** Creating or deactivating a tenant is exactly
+  what `audit_event` is for, and it is the next roadmap item.
 - **Swagger UI and `/v3/api-docs` are public.** Convenient locally, and it exposes
   the full API shape to anyone who can reach the service. Fine for a portfolio, not
   for a real deployment.

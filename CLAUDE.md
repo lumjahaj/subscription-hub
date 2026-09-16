@@ -110,6 +110,8 @@ payment/         api, app, domain, infra/{jpa, gateway}
 dunning/         app, domain, infra/jpa  (no api — it is a job, not endpoints)
 notification/    app, domain, infra/{jpa, sqs, mail, template}  (no api — an
                  outbox relay and a queue consumer, not endpoints)
+platform/        api, app  (no domain or infra — it orchestrates tenancy and
+                 auth; exists because tenancy → auth would close a cycle)
 audit/           (not built)
 ```
 
@@ -182,9 +184,24 @@ on every tenant-owned table.
   `Filter` bean into the servlet chain, so a bean would also run early, outside
   security, with no principal. `SecurityConfig` constructs it directly.
 - Filter skips what `SecurityConfig` permits: `/api/auth`, `/api/health`,
-  `/actuator`, `/swagger-ui`, `/v3/api-docs`. Being inside the security chain is
+  `/api/webhooks`, `/actuator`, `/swagger-ui`, `/v3/api-docs` — plus
+  `/api/platform`, whose tokens name no tenant. Being inside the security chain is
   not the same as running only on authenticated requests — a `permitAll` path still
   passes through every filter, just with an empty context.
+- **Two principals, and neither stands in for the other.** A tenant token carries
+  `tenant_id`; a platform token (`POST /api/platform/auth/token`, table
+  `platform_user`) carries `roles=["PLATFORM_ADMIN"]` and *no* `tenant_id`.
+  `SecurityConfig` requires `PLATFORM_ADMIN` on `/api/platform/**` and a
+  `tenant_id` claim on everything else (`anyRequest().access(hasTenantClaim())`),
+  so each gets 403 on the other's endpoints. The tenant rule is an allow-list on
+  the claim, not a deny-list of `PLATFORM_ADMIN`, so a future third kind of token
+  is refused by default. Anonymous callers still get 401: a denial for an anonymous
+  principal is turned into the entry point's 401, not 403.
+- **A platform request has an empty `TenantContext`**, so with open-in-view its
+  session is pinned to the `__no_tenant__` sentinel. Harmless today — `tenant`,
+  `app_user` and `platform_user` are not `TenantScoped` — but a platform endpoint
+  that reads a `TenantScoped` entity silently gets nothing, and needs the
+  `PaymentWebhookService` session treatment.
 - Exceptions: `MissingTenantException` → 400 `TENANT_MISSING` now means *a valid
   token carrying no `tenant_id`*, i.e. one minted by something other than
   `AuthService`; `UnknownTenantException` → 401 `TENANT_UNKNOWN` means the tenant
@@ -280,6 +297,15 @@ Postgres enum, so `InvoiceLineEntity.kind` deliberately gets plain
 `@Enumerated(EnumType.STRING)` — the NAMED_ENUM combo there would bind a
 nonexistent type and fail at startup. Same category of bug, opposite fix;
 check the column's actual Postgres type before reaching for the combo.
+
+**Spring Data `save()` on an assigned id merges.** `SimpleJpaRepository.save`
+persists only when the entity looks new, which for a non-generated id means "id
+is null" — never true for a slug like `tenant.id`. So `save` merges: it loads
+the existing row and overwrites it. A create that races past its existence
+check then silently replaces the other tenant instead of failing with 409.
+`TenantRepositoryImpl.create` therefore calls `EntityManager.persist` and
+flushes, so a duplicate fails on the primary key (`tenant_pkey`, mapped in
+`ProblemDetailsAdvice`). Generated UUID ids don't have this problem.
 
 **Integration tests + Testcontainers** — this has bitten once, silently, for
 three commits:
@@ -532,6 +558,9 @@ tenant (id varchar(64) PK — slug)
  └── audit_event
 
 invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
+
+platform_user (V15; unique email — belongs to no tenant, no FK to tenant; the
+               platform principal, deliberately not an app_user with a null tenant)
 ```
 
 Postgres enums: `subscription_status` (`TRIALING`, `ACTIVE`, `PAST_DUE`,
@@ -551,24 +580,25 @@ Subscription state transitions (cancel/pause/resume), renewal processing,
 usage metering, billing/invoice calculation, invoice PDFs (MinIO),
 JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
 settlement), dunning (automatic collection, retries, `PAST_DUE` →
-`UNCOLLECTIBLE`/`CANCELED`) and notifications (transactional outbox → SQS →
-email, invoice-issued/payment-failed/subscription-canceled) are done — see
-the subscription-hub-state skill.
+`UNCOLLECTIBLE`/`CANCELED`), notifications (transactional outbox → SQS →
+email, invoice-issued/payment-failed/subscription-canceled) and tenant
+provisioning (platform-admin principal and API) are done — see the
+subscription-hub-state skill.
 
-Next: **Tenant provisioning (platform-admin API)** → Audit events →
-Observability (Actuator, Micrometer, Prometheus, Grafana).
+Next: **Audit events** → Observability (Actuator, Micrometer, Prometheus,
+Grafana).
 
 Two notes on that order:
 
 - **Audit events moved after authentication**, and had to. `audit_event` has an
   `actor` column and the whole point of an audit log is recording *who* did
   something; building it before there was an authenticated principal would have
-  meant writing `actor = null` and then rebuilding it.
-- **Tenant provisioning is `POST /api/platform/tenants` behind a principal with
-  *no* `tenant_id` claim.** It earns its own roadmap line because it introduces
-  the platform-level principal that two other gaps already need — actuator
-  authorization beyond `/health`, and the fact that there is currently no way to
-  create a tenant at all (see Known gaps and improvements in the subscription-hub-state skill).
+  meant writing `actor = null` and then rebuilding it. There are now two kinds of
+  actor — a tenant user and a platform administrator — and provisioning or
+  deactivating a tenant is exactly the kind of action an audit log exists for.
+- **Observability still has to decide who may read metrics.** The platform
+  principal now exists, so `/actuator/prometheus` can be restricted to it (or to a
+  dedicated scrape credential); today `/actuator/**` accepts either kind of token.
 
 ---
 
