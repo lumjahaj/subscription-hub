@@ -558,6 +558,42 @@ description: What is built in Subscription Hub, why each decision was made, and 
     finish**, so a login fired the instant "Started" is logged can 401. Boot's
     readiness state only flips to accepting traffic after runners, so a deployment
     gated on the readiness probe never sees it.
+- **Deactivation policy: suspended, not billed, not forgiven.** Deactivating a
+  tenant stops the platform acting on its behalf, still records what already
+  happened, loses nothing, and resumes on reactivation. Pinned by
+  `tenancy/TenantDeactivationPolicyIntegrationTest`.
+
+  | Path | While inactive | On reactivation |
+  |---|---|---|
+  | API with the tenant's tokens | 401 `TENANT_UNKNOWN` | works again, same tokens |
+  | Renewal + invoicing (`BillingCycleJob`) | skipped | missed periods invoiced |
+  | Dunning charges (`DunningJob`) | skipped | open invoices charged |
+  | Outbox relay (`NotificationRelayJob`) | skipped, rows stay `PENDING` | published |
+  | Messages already on SQS | returned to `PENDING`, acknowledged | republished by the relay |
+  | Provider webhooks | **still settle** | — |
+
+  - **Why not keep billing:** the usual reasons to deactivate are an ended
+    contract, the tenant not paying the platform, or fraud. Charging cards and
+    emailing customers for a business the platform has cut off is a liability,
+    and in the fraud case exactly wrong.
+  - **Why not forgive the gap:** deactivation cuts the tenant off from *this* API,
+    not from its own customers, who almost certainly kept using the tenant's
+    product. The periods are owed; waiving them is the tenant's decision, not one
+    the platform should make silently. Subscription pause/resume doesn't re-anchor
+    periods either (`SubscriptionService.resume`), so this is consistent.
+  - **Why webhooks still settle:** the money already moved at the provider.
+    Refusing to record it would not undo the charge, only make the books disagree
+    with Stripe's.
+  - **No deactivation "reason" or second inactive state.** A permanent offboarding
+    is simply never reactivated, so the one flag already gives the right outcome.
+  - **The one real bug it surfaced**: the relay stopped publishing for inactive
+    tenants, but messages *already on the queue* were still delivered, so a
+    deactivated tenant's customers kept getting email. `NotificationDeliveryService`
+    now re-checks the tenant and hands the row back to the outbox. It returns
+    normally rather than throwing: a throw would have SQS redeliver the message
+    until the redrive policy dead-letters something that did nothing wrong. The
+    check runs **after** the already-`SENT` check, never before, or a redelivered
+    duplicate of a sent email would be re-queued and sent twice.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -895,13 +931,17 @@ feature module does.
 - **No tenant update or delete.** A tenant's name cannot be changed after
   creation, and deletion is intentionally absent (cascades would destroy
   financial records); deactivation is the only lifecycle operation.
-- **Deactivation silently pauses a tenant's background work.** `BillingCycleJob`,
-  `DunningJob` and `NotificationRelayJob` all iterate `findAllActive`, so while a
-  tenant is inactive its subscriptions stop renewing, its invoices stop being
-  chased and its queued emails stay `PENDING`; all three resume on reactivation
-  (renewal one period per run, as it always self-heals). A side effect of existing
-  code, not a designed policy — whether an inactive tenant should still bill is a
-  business decision nobody has made.
+- **Deactivation catches up in a burst.** A long suspension leaves several periods
+  due. Renewal advances one period per `BillingCycleJob` run (hourly), so the
+  tenant's customers receive one invoice, one charge and one email per hour until
+  their subscriptions are current, rather than one consolidated catch-up invoice.
+- **Held emails can be stale.** Bodies are rendered at enqueue time, so a
+  payment-failed email held through a suspension still says "we'll try again on"
+  a date that has passed by the time it is sent. Re-rendering at delivery, or
+  expiring time-sensitive notification types, is the refinement.
+- **Missed periods cannot be waived.** The policy is to bill them, and deciding
+  otherwise is the tenant's call per customer, but that needs a `VOID` invoice
+  transition, which is still unreachable.
 - **Provisioning is not audited.** Creating or deactivating a tenant is exactly
   what `audit_event` is for, and it is the next roadmap item.
 - **Swagger UI and `/v3/api-docs` are public.** Convenient locally, and it exposes

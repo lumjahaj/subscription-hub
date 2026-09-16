@@ -498,6 +498,22 @@ around when things are written to it and when the queue is touched.
   `elasticmq.conf` defines `notifications` and `notifications-dlq`; the app
   resolves them by name and never creates them.
 
+**Tenant deactivation invariants** — deactivation means *suspended*: stop acting
+for the tenant, record what already happened, lose nothing, resume on reactivation.
+Full reasoning under Current state in the subscription-hub-state skill.
+- **Every scheduled job iterates `findAllActive`**, never all tenants. A new job
+  that acts on a tenant's behalf (charges, emails, renews) must do the same, or it
+  will bill a tenant that was cut off.
+- **Anything that can already be in flight re-checks.** A job's filter only stops
+  *new* work; `NotificationDeliveryService` re-checks the tenant because a message
+  can be on the queue before deactivation. It hands the row back to `PENDING` and
+  returns normally. Throwing would dead-letter it. The check comes after the
+  already-`SENT` check, or a duplicate would be re-sent on reactivation.
+- **Settlement never checks.** A provider event records money that has already
+  moved; refusing it would leave the books wrong without undoing the charge.
+- **Missed periods are billed on reactivation, not forgiven.** Waiving them is the
+  tenant's decision, and needs `VOID`.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
 
