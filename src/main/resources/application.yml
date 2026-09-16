@@ -53,7 +53,20 @@ billing:
 
 payment:
   # fake: in-process, no network or secrets - the default, and what tests use.
+  # stripe: the real API, which additionally needs stripe.secret-key below.
   provider: fake
+
+stripe:
+  # Only read when payment.provider=stripe; StripeConfig then refuses to
+  # start if the key is blank. Empty defaults so the application still boots
+  # from a clean clone with no Stripe account (CLAUDE.md §2).
+  secret-key: ${STRIPE_SECRET_KEY:}
+  # Verifies webhook signatures. Printed by `stripe listen`, or found in the
+  # Stripe dashboard's webhook settings.
+  webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
+  # Empty means the real Stripe API. Point it at a local stripe-mock
+  # (http://localhost:12111) to exercise the adapter without an account.
+  api-base: ${STRIPE_API_BASE:}
 
 management:
   endpoints:

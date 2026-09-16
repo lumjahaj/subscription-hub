@@ -119,6 +119,13 @@ class ArchitectureTest {
                     .because("the object-store vendor is meant to be a config value, which only holds "
                             + "while a single adapter knows the SDK exists");
 
+    @ArchTest
+    static final ArchRule stripe_sdk_stays_in_payment_infra_gateway =
+            noClasses().that().resideOutsideOfPackage(BASE + ".payment.infra.gateway..")
+                    .should().dependOnClassesThat().resideInAPackage("com.stripe..")
+                    .because("the payment provider is meant to be a config value, which only holds "
+                            + "while one adapter knows Stripe exists - the same rule the AWS SDK follows");
+
     // ---- 6. Naming and placement ----
 
     @ArchTest

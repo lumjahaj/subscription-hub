@@ -31,6 +31,7 @@
         <awssdk.version>2.31.78</awssdk.version>
         <openhtmltopdf.version>1.1.83</openhtmltopdf.version>
         <archunit.version>1.5.0</archunit.version>
+        <stripe.version>33.4.2</stripe.version>
     </properties>
 
     <!--
@@ -128,6 +129,20 @@
         <dependency>
             <groupId>org.thymeleaf</groupId>
             <artifactId>thymeleaf</artifactId>
+        </dependency>
+
+        <!--
+            Stripe is one of two payment gateway adapters, selected by
+            payment.provider; the default is the in-process fake, so this
+            SDK is only on the path so that a real provider *can* be
+            configured. Nothing outside payment/infra/gateway may import it
+            (enforced by ArchitectureTest), which is what keeps the provider
+            a config value - the same shape as the AWS SDK for storage.
+        -->
+        <dependency>
+            <groupId>com.stripe</groupId>
+            <artifactId>stripe-java</artifactId>
+            <version>${stripe.version}</version>
         </dependency>
 
         <dependency>
