@@ -32,8 +32,11 @@ class StripePaymentGatewayTest {
 
     private static final int STRIPE_MOCK_PORT = 12111;
 
+    // Pinned, not :latest — a moving tag makes a build reproduce differently
+    // on a machine that pulled it last month, which is exactly how the MinIO
+    // image breaking went unnoticed locally while CI failed.
     private static final GenericContainer<?> STRIPE_MOCK =
-            new GenericContainer<>(DockerImageName.parse("stripe/stripe-mock:latest"))
+            new GenericContainer<>(DockerImageName.parse("stripe/stripe-mock:v0.203.0"))
                     .withExposedPorts(STRIPE_MOCK_PORT);
 
     static {

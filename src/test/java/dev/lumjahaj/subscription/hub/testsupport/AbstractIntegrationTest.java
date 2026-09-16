@@ -17,6 +17,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.MinIOContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -86,8 +87,15 @@ public abstract class AbstractIntegrationTest {
     // No @ServiceConnection equivalent: Spring Boot has no S3 auto-configuration
     // to feed connection details into (that lives in Spring Cloud AWS), so the
     // endpoint and credentials are wired through @DynamicPropertySource instead.
-    static final MinIOContainer MINIO =
-            new MinIOContainer("minio/minio:RELEASE.2024-08-17T01-24-54Z");
+    // quay.io, not Docker Hub: MinIO's docker.io/minio/minio repository is
+    // gone (a pull now answers "repository does not exist"), which broke CI
+    // while every developer machine kept passing from its local image cache.
+    // MinIO's own documentation has pointed at quay.io for some time.
+    // asCompatibleSubstituteFor tells Testcontainers this is still MinIO;
+    // MinIOContainer otherwise rejects an image whose name isn't minio/minio.
+    static final MinIOContainer MINIO = new MinIOContainer(
+            DockerImageName.parse("quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z")
+                    .asCompatibleSubstituteFor("minio/minio"));
 
     static {
         POSTGRES.start();

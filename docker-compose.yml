@@ -31,7 +31,12 @@ services:
   # S3. 9000 is the S3 API the app uses; 9001 is the web console for
   # eyeballing stored objects during development.
   minio:
-    image: minio/minio
+    # quay.io and a pinned tag: MinIO's Docker Hub repository no longer
+    # exists, so `image: minio/minio` only still works on a machine that
+    # pulled it before it disappeared - a fresh clone gets "repository does
+    # not exist". Pinned rather than :latest so this cannot drift again
+    # without the change being visible in a diff.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: subscription-hub-minio
     restart: unless-stopped
     environment:
