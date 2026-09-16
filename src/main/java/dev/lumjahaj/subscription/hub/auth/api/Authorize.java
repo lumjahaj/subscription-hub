@@ -37,4 +37,12 @@ public final class Authorize {
      * its catalog.
      */
     public static final String COMMERCIAL = "hasAnyRole('ADMIN', 'BILLING')";
+
+    /**
+     * Operating the platform across tenants. SecurityConfig already requires
+     * this role for every /api/platform/** path, so on those controllers the
+     * annotation is defence in depth, kept so the rule stays visible next to
+     * the method — and so a controller moved to another path stays protected.
+     */
+    public static final String PLATFORM_ADMIN = "hasRole('PLATFORM_ADMIN')";
 }

@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.testsupport;
 
+import dev.lumjahaj.subscription.hub.auth.api.dto.PlatformTokenRequest;
+import dev.lumjahaj.subscription.hub.auth.api.dto.PlatformTokenResponse;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenRequest;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenResponse;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -175,6 +177,30 @@ public abstract class AbstractIntegrationTest {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(TOKENS.computeIfAbsent(tenantId, this::login));
         return headers;
+    }
+
+    /**
+     * A token for the seeded platform administrator (db/seed V9002), which
+     * carries no tenant_id. Cached under a key no tenant slug can take —
+     * slugs cannot contain a colon — so it can never be handed out as a
+     * tenant's token.
+     */
+    protected HttpHeaders platformHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(TOKENS.computeIfAbsent("platform:admin", key -> platformLogin()));
+        return headers;
+    }
+
+    private String platformLogin() {
+        ResponseEntity<PlatformTokenResponse> response = restTemplate.exchange(
+                "/api/platform/auth/token", HttpMethod.POST,
+                new HttpEntity<>(new PlatformTokenRequest("platform@subscriptionhub.test", SEEDED_PASSWORD)),
+                PlatformTokenResponse.class);
+
+        assertThat(response.getStatusCode())
+                .as("login for the seeded platform administrator")
+                .isEqualTo(HttpStatus.OK);
+        return response.getBody().token();
     }
 
     /**

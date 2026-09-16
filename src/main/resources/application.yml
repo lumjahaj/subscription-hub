@@ -64,6 +64,14 @@ auth:
     secret: ${JWT_SECRET}
     ttl: 1h
 
+platform:
+  bootstrap:
+    # Creates the first platform administrator at startup, and only while
+    # platform_user is empty (PlatformAdminBootstrap). Unset by default: the
+    # dev profile gets one from db/seed instead, and a clean clone needs none.
+    admin-email: ${PLATFORM_ADMIN_EMAIL:}
+    admin-password: ${PLATFORM_ADMIN_PASSWORD:}
+
 billing:
   cycle:
     cron: "0 0 * * * *"   # hourly, on the hour - invoices then renews each due subscription

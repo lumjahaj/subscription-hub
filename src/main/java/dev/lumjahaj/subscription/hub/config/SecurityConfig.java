@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.config;
 
+import dev.lumjahaj.subscription.hub.auth.domain.PlatformRole;
 import dev.lumjahaj.subscription.hub.common.api.SecurityProblemHandler;
 import dev.lumjahaj.subscription.hub.tenancy.api.TenantResolverFilter;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantRepository;
@@ -7,6 +8,10 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.authorization.AuthorizationDecision;
+import org.springframework.security.authorization.AuthorizationManager;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -50,7 +55,7 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         // Obtaining a token cannot itself require one.
-                        .requestMatchers(HttpMethod.POST, "/api/auth/token").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/auth/token", "/api/platform/auth/token").permitAll()
                         // Liveness probes run before anything can authenticate.
                         .requestMatchers("/api/health", "/actuator/health").permitAll()
                         // Payment providers hold no token of ours. These
@@ -60,12 +65,25 @@ public class SecurityConfig {
                         // TenantResolverFilter.shouldNotFilter in step.
                         .requestMatchers(HttpMethod.POST, "/api/webhooks/**").permitAll()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
+                        // Cross-tenant operations. A tenant ADMIN is refused
+                        // here: administering one tenant confers nothing over
+                        // the platform.
+                        .requestMatchers("/api/platform/**").hasRole(PlatformRole.PLATFORM_ADMIN)
                         // Everything else under /actuator is platform
                         // infrastructure: authenticated at minimum, never
                         // blanket-public. Only health and info are exposed at
                         // all (see application.yml), so this is defence in
-                        // depth against a future exposure change.
-                        .anyRequest().authenticated())
+                        // depth against a future exposure change. Deliberately
+                        // either kind of token for now; Observability decides
+                        // who may read metrics.
+                        .requestMatchers("/actuator/**").authenticated()
+                        // Every tenant endpoint needs a token that names a
+                        // tenant. A platform token is authenticated but has
+                        // no tenant_id, so without this it would reach
+                        // TenantResolverFilter and be answered 400
+                        // TENANT_MISSING - true, but it describes a malformed
+                        // request rather than a caller who isn't allowed here.
+                        .anyRequest().access(hasTenantClaim()))
                 .oauth2ResourceServer(oauth -> oauth
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter()))
                         .authenticationEntryPoint(problemHandler))
@@ -86,6 +104,24 @@ public class SecurityConfig {
                 .addFilterAfter(tenantResolverFilter(), AuthorizationFilter.class);
 
         return http.build();
+    }
+
+    /**
+     * Grants tenant endpoints only to a token carrying a tenant_id claim.
+     *
+     * Checked on the claim rather than "does not have PLATFORM_ADMIN": an
+     * allow-list of what a tenant request needs, not a deny-list of the
+     * principals known today, so a future third kind of token is refused
+     * until someone decides otherwise.
+     *
+     * An anonymous caller is denied too, and ExceptionTranslationFilter
+     * turns a denial for an anonymous caller into 401 rather than 403 —
+     * so this also still covers what authenticated() used to.
+     */
+    private static AuthorizationManager<RequestAuthorizationContext> hasTenantClaim() {
+        return (authentication, context) -> new AuthorizationDecision(
+                authentication.get() instanceof JwtAuthenticationToken jwt
+                        && jwt.getToken().hasClaim(TenantResolverFilter.TENANT_CLAIM));
     }
 
     /**

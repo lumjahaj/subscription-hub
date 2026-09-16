@@ -88,6 +88,10 @@ public class TenantResolverFilter extends OncePerRequestFilter {
      * isn't AuthService — anomalous rather than an ordinary client
      * mistake. MissingTenantException survived the move from
      * header-based resolution with exactly that narrower meaning.
+     *
+     * Since platform tokens exist, SecurityConfig refuses a token without
+     * tenant_id before this filter runs, so this is now a backstop rather
+     * than a path any real request takes.
      */
     private String tenantIdFromToken() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
@@ -123,6 +127,10 @@ public class TenantResolverFilter extends OncePerRequestFilter {
                 // to read; its tenant comes from the signed event body and
                 // is established by PaymentWebhookService instead.
                 || path.startsWith("/api/webhooks")
+                // Platform requests act across tenants and their tokens name
+                // none; SecurityConfig admits only PLATFORM_ADMIN tokens
+                // here, and only tokens with a tenant_id everywhere else.
+                || path.startsWith("/api/platform")
                 || path.startsWith("/actuator")
                 || path.startsWith("/swagger-ui")
                 || path.startsWith("/v3/api-docs");

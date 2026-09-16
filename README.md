@@ -138,6 +138,12 @@ erDiagram
         uuid user_id FK "PK: user_id+role"
         varchar role "ADMIN|BILLING|SUPPORT|USER"
     }
+    PLATFORM_USER {
+        uuid id PK
+        text email "uk: email - belongs to no tenant"
+        text password_hash "bcrypt"
+        boolean enabled
+    }
     PRODUCT {
         uuid id PK
         varchar tenant_id FK "uk: tenant_id+code"

@@ -5,17 +5,11 @@ import dev.lumjahaj.subscription.hub.auth.api.dto.TokenResponse;
 import dev.lumjahaj.subscription.hub.auth.domain.AppUserRepository;
 import dev.lumjahaj.subscription.hub.auth.domain.Role;
 import dev.lumjahaj.subscription.hub.auth.infra.jpa.AppUserEntity;
-import dev.lumjahaj.subscription.hub.config.JwtConfig;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantRepository;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
-import org.springframework.security.oauth2.jwt.*;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
-import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -23,33 +17,21 @@ import java.util.stream.Collectors;
 @Service
 public class AuthService {
 
-    /**
-     * A valid bcrypt hash of a value nothing will ever submit. Used to
-     * spend the same ~100ms of hashing when no user was found as when one
-     * was, so response time doesn't reveal which emails exist — the same
-     * reason every failure below throws the identical exception.
-     */
-    private static final String DUMMY_HASH =
-            "$2a$10$weWhaGYAMz9Fzc9M.xikWefRTaxBFywEYnMyYYZYz/LTSnaeP8gci";
-
     private final AppUserRepository users;
     private final TenantRepository tenants;
-    private final PasswordEncoder passwordEncoder;
-    private final JwtEncoder jwtEncoder;
-    private final Duration ttl;
+    private final PasswordVerifier passwordVerifier;
+    private final TokenIssuer tokenIssuer;
 
     public AuthService(
             AppUserRepository users,
             TenantRepository tenants,
-            PasswordEncoder passwordEncoder,
-            JwtEncoder jwtEncoder,
-            @Value("${auth.jwt.ttl}") Duration ttl
+            PasswordVerifier passwordVerifier,
+            TokenIssuer tokenIssuer
     ) {
         this.users = users;
         this.tenants = tenants;
-        this.passwordEncoder = passwordEncoder;
-        this.jwtEncoder = jwtEncoder;
-        this.ttl = ttl;
+        this.passwordVerifier = passwordVerifier;
+        this.tokenIssuer = tokenIssuer;
     }
 
     /**
@@ -72,38 +54,22 @@ public class AuthService {
                 ? users.findByTenantIdAndEmail(request.tenantId(), request.email())
                 : Optional.empty();
 
-        // Always hash, even on the paths that already cannot succeed, so
-        // response time doesn't reveal which tenants and emails exist.
-        String hashToCheck = found.map(AppUserEntity::getPasswordHash).orElse(DUMMY_HASH);
-        boolean passwordMatches = passwordEncoder.matches(request.password(), hashToCheck);
-
-        AppUserEntity user = found
-                .filter(u -> passwordMatches && u.isEnabled())
-                .orElseThrow(InvalidCredentialsException::new);
+        AppUserEntity user = passwordVerifier.verify(
+                found, AppUserEntity::getPasswordHash, AppUserEntity::isEnabled, request.password());
 
         return issueFor(user);
     }
 
     private TokenResponse issueFor(AppUserEntity user) {
-        Instant issuedAt = Instant.now();
-        Instant expiresAt = issuedAt.plus(ttl);
         Set<String> roles = user.getRoles().stream().map(Role::name).collect(Collectors.toSet());
 
-        JwtClaimsSet claims = JwtClaimsSet.builder()
-                .issuer(JwtConfig.ISSUER)
-                .issuedAt(issuedAt)
-                .expiresAt(expiresAt)
-                .subject(user.getId().toString())
+        TokenIssuer.IssuedToken issued = tokenIssuer.issue(user.getId().toString(), Map.of(
                 // Snake case because these are wire-format JWT claims, not
                 // Java properties - TenantResolverFilter reads tenant_id
                 // back out on every subsequent request.
-                .claim("tenant_id", user.getTenantId())
-                .claim("roles", roles)
-                .build();
+                "tenant_id", user.getTenantId(),
+                "roles", roles));
 
-        JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();
-        String token = jwtEncoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
-
-        return new TokenResponse(token, "Bearer", expiresAt, user.getTenantId(), roles);
+        return new TokenResponse(issued.token(), "Bearer", issued.expiresAt(), user.getTenantId(), roles);
     }
 }
