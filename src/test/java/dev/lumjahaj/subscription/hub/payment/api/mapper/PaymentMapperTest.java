@@ -29,7 +29,7 @@ class PaymentMapperTest extends MapperValidationSupport {
         entity.setCurrency("USD");
         entity.setStatus(PaymentStatus.FAILED);
         entity.setProvider("fake");
-        entity.setPaymentMethod("pm_card_chargeDeclined");
+        entity.setPaymentMethod("pm_card_visa_chargeDeclined");
         entity.setProviderReference("fake_pi_123");
         entity.setFailureCode("card_declined");
         entity.setIdempotencyKey("key-1");
@@ -44,7 +44,7 @@ class PaymentMapperTest extends MapperValidationSupport {
         assertThat(response.currency()).isEqualTo("USD");
         assertThat(response.status()).isEqualTo(PaymentStatus.FAILED);
         assertThat(response.provider()).isEqualTo("fake");
-        assertThat(response.paymentMethod()).isEqualTo("pm_card_chargeDeclined");
+        assertThat(response.paymentMethod()).isEqualTo("pm_card_visa_chargeDeclined");
         assertThat(response.providerReference()).isEqualTo("fake_pi_123");
         assertThat(response.failureCode()).isEqualTo("card_declined");
         assertThat(response.createdAt()).isEqualTo(entity.getCreatedAt());

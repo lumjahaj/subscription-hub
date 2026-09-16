@@ -52,7 +52,7 @@ class PaymentIntegrationTest extends AbstractIntegrationTest {
 
     private static final String TENANT = "acme";
     private static final String SUCCEEDS = "pm_card_visa";
-    private static final String DECLINED = "pm_card_chargeDeclined";
+    private static final String DECLINED = "pm_card_visa_chargeDeclined";
     private static final String UNAVAILABLE = "pm_fake_provider_unavailable";
 
     @Autowired

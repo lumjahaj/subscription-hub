@@ -2,10 +2,10 @@
 ### Runs against the default fake provider (payment.provider=fake): no
 ### network, no account. Payment methods are Stripe's own test ids, so the
 ### same requests will work unchanged once the Stripe adapter exists:
-###   pm_card_visa                             succeeds
-###   pm_card_chargeDeclined                   fails, card_declined
-###   pm_card_chargeDeclinedInsufficientFunds  fails, insufficient_funds
-###   pm_fake_provider_unavailable             fake only: provider unreachable (503)
+###   pm_card_visa                                  succeeds
+###   pm_card_visa_chargeDeclined                   fails, card_declined
+###   pm_card_visa_chargeDeclinedInsufficientFunds  fails, insufficient_funds
+###   pm_fake_provider_unavailable                  fake only: unreachable (503)
 ###
 ### Prerequisite: an OPEN invoice. Run billing.http through "Generate invoice
 ### — after the period closes" first; it sets {{billingInvoiceId}}.
@@ -107,7 +107,7 @@ Authorization: Bearer {{acmeToken}}
 Idempotency-Key: declined-attempt-1
 
 {
-  "paymentMethod": "pm_card_chargeDeclined"
+  "paymentMethod": "pm_card_visa_chargeDeclined"
 }
 
 ### Pay — same Idempotency-Key, different payment method

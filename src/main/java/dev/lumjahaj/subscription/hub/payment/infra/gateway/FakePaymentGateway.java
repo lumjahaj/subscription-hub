@@ -23,8 +23,8 @@ import org.springframework.stereotype.Component;
  * unchanged against either provider:
  * <ul>
  *   <li>{@code pm_card_visa} — succeeds</li>
- *   <li>{@code pm_card_chargeDeclined} — fails with {@code card_declined}</li>
- *   <li>{@code pm_card_chargeDeclinedInsufficientFunds} — fails with {@code insufficient_funds}</li>
+ *   <li>{@code pm_card_visa_chargeDeclined} — fails with {@code card_declined}</li>
+ *   <li>{@code pm_card_visa_chargeDeclinedInsufficientFunds} — fails with {@code insufficient_funds}</li>
  *   <li>{@code pm_fake_provider_unavailable} — fake-only: the provider can't be reached</li>
  *   <li>anything else — fails with {@code payment_method_invalid}</li>
  * </ul>
@@ -41,8 +41,8 @@ public class FakePaymentGateway implements PaymentGateway {
     static final String PROVIDER = "fake";
 
     static final String SUCCEEDS = "pm_card_visa";
-    static final String DECLINED = "pm_card_chargeDeclined";
-    static final String INSUFFICIENT_FUNDS = "pm_card_chargeDeclinedInsufficientFunds";
+    static final String DECLINED = "pm_card_visa_chargeDeclined";
+    static final String INSUFFICIENT_FUNDS = "pm_card_visa_chargeDeclinedInsufficientFunds";
     static final String PROVIDER_UNAVAILABLE = "pm_fake_provider_unavailable";
 
     private final PaymentEventHandler events;

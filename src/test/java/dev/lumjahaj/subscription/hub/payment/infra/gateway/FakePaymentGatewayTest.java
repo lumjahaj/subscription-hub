@@ -21,10 +21,10 @@ class FakePaymentGatewayTest {
 
     @ParameterizedTest
     @CsvSource(nullValues = "null", value = {
-            "pm_card_visa,                            SUCCEEDED, null",
-            "pm_card_chargeDeclined,                  FAILED,    card_declined",
-            "pm_card_chargeDeclinedInsufficientFunds, FAILED,    insufficient_funds",
-            "pm_something_unknown,                    FAILED,    payment_method_invalid"
+            "pm_card_visa,                                 SUCCEEDED, null",
+            "pm_card_visa_chargeDeclined,                  FAILED,    card_declined",
+            "pm_card_visa_chargeDeclinedInsufficientFunds, FAILED,    insufficient_funds",
+            "pm_something_unknown,                         FAILED,    payment_method_invalid"
     })
     void createPayment_deliversTheOutcomeForThePaymentMethod(
             String paymentMethod, PaymentEvent.Outcome outcome, String failureCode) {
