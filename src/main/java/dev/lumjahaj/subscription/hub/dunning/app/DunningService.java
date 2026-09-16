@@ -5,6 +5,7 @@ import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
 import dev.lumjahaj.subscription.hub.dunning.domain.DunningStateRepository;
 import dev.lumjahaj.subscription.hub.dunning.infra.jpa.DunningStateEntity;
+import dev.lumjahaj.subscription.hub.notification.app.NotificationService;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentOutcomeListener;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentRepository;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentStatus;
@@ -41,19 +42,22 @@ public class DunningService implements PaymentOutcomeListener {
     private final SubscriptionRepository subscriptions;
     private final PaymentRepository payments;
     private final DunningSchedule schedule;
+    private final NotificationService notificationService;
 
     public DunningService(
             DunningStateRepository dunningStates,
             InvoiceRepository invoices,
             SubscriptionRepository subscriptions,
             PaymentRepository payments,
-            DunningSchedule schedule
+            DunningSchedule schedule,
+            NotificationService notificationService
     ) {
         this.dunningStates = dunningStates;
         this.invoices = invoices;
         this.subscriptions = subscriptions;
         this.payments = payments;
         this.schedule = schedule;
+        this.notificationService = notificationService;
     }
 
     /**
@@ -118,6 +122,10 @@ public class DunningService implements PaymentOutcomeListener {
 
         dunningStates.save(state);
         markPastDue(invoice);
+        // state.getNextAttemptAt() already reflects the schedule's next
+        // slot: startAttempt set it before the provider was ever called, so
+        // there is nothing left to compute here, only to tell the customer.
+        notificationService.enqueuePaymentFailed(invoice, state.getAttemptCount(), state.getNextAttemptAt());
     }
 
     /**
@@ -223,5 +231,7 @@ public class DunningService implements PaymentOutcomeListener {
         dunningStates.delete(state);
         log.warn("Gave up collecting invoice {} after {} attempts (last failure: {}); subscription {} canceled",
                 invoice.getNumber(), state.getAttemptCount(), failureCode, subscription.getId());
+
+        notificationService.enqueueSubscriptionCanceled(invoice);
     }
 }
