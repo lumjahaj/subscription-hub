@@ -88,6 +88,173 @@ interface (the port the app layer depends on), an infra-layer
 `XxxRepositoryImpl` adapter, and a Spring Data `XxxJpaRepository`. This keeps
 Spring Data's query-naming machinery out of the domain contract.
 
+### Data model
+
+Single Postgres database, single schema. Every tenant-owned table carries a
+`tenant_id` column — see [Multi-tenancy](#multi-tenancy) below.
+
+```mermaid
+erDiagram
+    TENANT ||--o{ PRODUCT : owns
+    TENANT ||--o{ CUSTOMER : owns
+    TENANT ||--o{ APP_USER : owns
+    TENANT ||--o{ AUDIT_EVENT : records
+    TENANT ||--|| INVOICE_NUMBER_SEQUENCE : numbers
+
+    APP_USER ||--o{ APP_USER_ROLE : granted
+    PRODUCT ||--o{ PLAN : "priced as"
+    PLAN ||--o{ PLAN_ENTITLEMENT : grants
+    CUSTOMER ||--o{ SUBSCRIPTION : has
+    PLAN ||--o{ SUBSCRIPTION : "billed by"
+    SUBSCRIPTION ||--o{ SUBSCRIPTION_ENTITLEMENT_OVERRIDE : overrides
+    SUBSCRIPTION ||--o{ USAGE_COUNTER : meters
+    SUBSCRIPTION ||--o{ INVOICE : bills
+    CUSTOMER ||--o{ INVOICE : "billed to"
+    INVOICE ||--o{ INVOICE_LINE : "itemised by"
+    INVOICE ||--o{ PAYMENT : "settled by"
+    INVOICE ||--o| DUNNING_STATE : "chased by"
+
+    TENANT {
+        varchar id PK "slug, e.g. acme"
+        text name
+        boolean active "false rejects every request"
+    }
+    APP_USER {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+email"
+        text email
+        text password_hash "bcrypt"
+        boolean enabled
+    }
+    APP_USER_ROLE {
+        uuid user_id FK "PK: user_id+role"
+        varchar role "ADMIN|BILLING|SUPPORT|USER"
+    }
+    PRODUCT {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+code"
+        varchar code
+        text name
+    }
+    PLAN {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+code"
+        uuid product_id FK
+        varchar code
+        enum interval_unit "MONTH|YEAR"
+        int interval_count "bill every N units"
+        bigint amount_cents "integer minor units"
+        varchar currency
+        int trial_days
+    }
+    PLAN_ENTITLEMENT {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+plan_id+key"
+        uuid plan_id FK
+        varchar key
+        jsonb value_json "includedQuantity, unitAmountCents"
+    }
+    CUSTOMER {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+email"
+        text email
+        text name
+        varchar default_payment_method "provider token, never card data"
+    }
+    SUBSCRIPTION {
+        uuid id PK
+        varchar tenant_id FK
+        uuid customer_id FK
+        uuid plan_id FK
+        enum status "TRIALING|ACTIVE|PAST_DUE|PAUSED|CANCELED"
+        timestamptz current_period_start
+        timestamptz current_period_end
+        timestamptz next_renewal "always equals current_period_end"
+    }
+    SUBSCRIPTION_ENTITLEMENT_OVERRIDE {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+subscription_id+key"
+        uuid subscription_id FK
+        varchar key
+        jsonb value_json
+    }
+    USAGE_COUNTER {
+        uuid id PK
+        varchar tenant_id FK "uk: +subscription_id+meter_key+period_start"
+        uuid subscription_id FK
+        varchar meter_key
+        timestamptz period_start "read off the subscription, never the request"
+        timestamptz period_end
+        numeric amount "fractional quantity, not money"
+    }
+    INVOICE {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+number"
+        uuid subscription_id FK "uk: +tenant_id+period_start"
+        uuid customer_id FK
+        varchar number "INV-000001, restarts per tenant"
+        enum status "DRAFT|OPEN|PAID|VOID|UNCOLLECTIBLE"
+        bigint total_cents "sum of already-rounded lines"
+        timestamptz period_start
+        timestamptz period_end
+        text pdf_object_key "object key, not a URL"
+        timestamptz paid_at
+    }
+    INVOICE_LINE {
+        uuid id PK
+        varchar tenant_id FK
+        uuid invoice_id FK
+        varchar kind "BASE|USAGE - varchar, not a pg enum"
+        numeric quantity
+        bigint unit_amount_cents
+        bigint amount_cents
+    }
+    INVOICE_NUMBER_SEQUENCE {
+        varchar tenant_id PK "FK to tenant"
+        bigint last_value "allocated by a native upsert"
+    }
+    PAYMENT {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+idempotency_key"
+        uuid invoice_id FK "one PENDING-or-SUCCEEDED per invoice"
+        bigint amount_cents "copied from the invoice, never the request"
+        varchar currency
+        enum status "PENDING|SUCCEEDED|FAILED"
+        varchar provider "fake|stripe"
+        varchar idempotency_key "caller-supplied, doubles as our payment id"
+        varchar provider_reference
+        varchar failure_code
+    }
+    DUNNING_STATE {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+invoice_id"
+        uuid invoice_id FK
+        int attempt_count "committed before the provider is called"
+        timestamptz next_attempt_at
+        varchar last_failure_code
+    }
+    AUDIT_EVENT {
+        uuid id PK
+        varchar tenant_id FK
+        text actor
+        varchar type
+        varchar entity_type
+        jsonb data
+    }
+```
+
+`TENANT` is drawn connected only to the tables nothing else owns. Every other
+entity above carries a `tenant_id` of its own — 15 of the 16 tables do — and
+drawing all of those edges would bury the billing path.
+
+`audit_event` exists but nothing writes to it yet; `invoice.status` only reaches
+`OPEN`, `PAID` and `UNCOLLECTIBLE` today.
+
+To explore the schema interactively instead, pgAdmin is already running on
+[localhost:8081](http://localhost:8081): connect to the `postgres` service, then
+right-click the database → **ERD For Database** for a draggable, PNG-exportable
+diagram generated from live foreign keys.
+
 ### Multi-tenancy
 
 Single database, single schema, row-level isolation via a `tenant_id` column
@@ -316,7 +483,10 @@ dunning lifecycle are all verified against the real thing rather than mocks.
 ## Project docs
 
 [`CLAUDE.md`](CLAUDE.md) is the living architecture and conventions doc — data
-model, module conventions, and the rules each module follows.
+model, module conventions, and the rules each module follows. The
+[data model diagram](#data-model) above is checked against the live schema by
+`DataModelDiagramIntegrationTest`, so it can't silently drift as migrations
+land.
 
 [`.claude/skills/subscription-hub-state/SKILL.md`](.claude/skills/subscription-hub-state/SKILL.md)
 holds the detailed current state: what is built, why each decision was made, and
