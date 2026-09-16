@@ -34,10 +34,16 @@ tenants (SaaS customers) from one deployment:
   counters, with per-tenant human-readable invoice numbers.
 - **Invoice PDFs** are rendered from an HTML template and stored in MinIO
   (S3-compatible object storage), then streamed back through the API.
+- **Payments** collect an invoice through a provider port. The default provider
+  is an in-process fake — no account, no network — and Stripe is opt-in by
+  config. Neither reports the outcome from the API call itself: a payment is
+  created `PENDING` and settled only by a provider event (a webhook, for
+  Stripe), so both providers share one settlement path and one set of rules.
 
-Mock payments, dunning, notifications, tenant provisioning and audit logging are
-on the roadmap but not yet built — see [`CLAUDE.md`](CLAUDE.md) for the detailed
-current state, and for an honest list of what's deliberately missing.
+Dunning, notifications, tenant provisioning and audit logging are on the roadmap
+but not yet built — see [`CLAUDE.md`](CLAUDE.md) for the architecture and
+conventions, and the state skill linked at the bottom for the detailed current
+state and an honest list of what's deliberately missing.
 
 ---
 
@@ -55,6 +61,7 @@ customer/        Customer
 subscription/    Subscription, renewal
 usage/           metered usage counters
 billing/         Invoice, invoice lines, PDF rendering and storage
+payment/         provider port, fake + Stripe adapters, webhook settlement
 ```
 
 Each feature module follows `api → app → domain ← infra`:
@@ -64,9 +71,10 @@ Each feature module follows `api → app → domain ← infra`:
 - **`domain`** — domain models and repository interfaces (ports)
 - **`infra/jpa`** — JPA entities and Spring Data repositories (adapters)
 
-`billing` additionally has `infra/pdf` and `infra/storage`: three different
-outside systems (database, rendering library, object store), each behind its
-own port rather than one catch-all adapter package.
+`billing` additionally has `infra/pdf` and `infra/storage`, and `payment` has
+`infra/gateway`: each outside system (database, rendering library, object store,
+payment provider) sits behind its own port rather than in one catch-all adapter
+package.
 
 Repositories follow a fixed trio pattern: a domain-layer `XxxRepository`
 interface (the port the app layer depends on), an infra-layer
@@ -95,6 +103,28 @@ signed claim is what closes that.
 No token returns `401 UNAUTHENTICATED`; an authenticated caller lacking the
 required role returns `403 ACCESS_DENIED`.
 
+### Payments
+
+Charging money is the one place where "retry it" and "roll it back" stop being
+free, so three things are deliberate:
+
+- **The provider call happens outside any transaction.** A `PENDING` payment is
+  reserved in one short transaction, the provider is called with none open, and
+  the reference is recorded in a second. A rollback cannot un-charge a card, and
+  holding a database connection open across a network call is how a pool dies.
+- **One charge per invoice is enforced by the database.** A partial unique index
+  allows at most one `PENDING`-or-`SUCCEEDED` payment per invoice. Code checks
+  the invoice is open first, but two concurrent requests both pass that check;
+  the index is what makes the loser fail *before* reaching the provider.
+- **Settlement is idempotent by state, not by remembering event ids.** Only a
+  `PENDING` payment can settle, and it settles once, so a redelivered,
+  duplicated or out-of-order event changes nothing — and providers guarantee
+  none of those three won't happen.
+
+A caller must send an `Idempotency-Key`; it replays the first result rather than
+charging twice, and it is the only way to resume a payment the provider never
+acknowledged.
+
 ### Error handling
 
 Errors are returned as RFC 7807 `application/problem+json`, with a `code`
@@ -111,11 +141,17 @@ and a `requestId` (for log correlation) on every error response.
   endpoint
 - openhtmltopdf + Thymeleaf (as a library, not the Spring MVC starter) for
   rendering invoice PDFs
+- `stripe-java` for the opt-in Stripe adapter. **No Stripe account is needed to
+  build, run or test this project**: the default provider is the in-process
+  fake, the adapter is exercised against `stripe-mock` (Stripe's own local API
+  server, as a container), and webhook tests sign their payloads themselves,
+  since verification is an HMAC against a shared secret. That is why the Stripe
+  path has CI coverage a real-account integration could never have
 - Maven
 - springdoc-openapi (Swagger UI)
 - Docker Compose (Postgres + pgAdmin + MinIO)
-- Testcontainers — integration tests run against a real Postgres and a real
-  MinIO, not mocks
+- Testcontainers — integration tests run against a real Postgres, a real MinIO
+  and Stripe's own `stripe-mock`, not hand-written mocks
 - GitHub Actions CI (`mvn verify`; the tests provision their own containers)
 
 ---
@@ -202,8 +238,23 @@ admin, plus one read-only user for trying the role rules:
 
 These exist only under the `dev` profile. Reads are open to any authenticated
 role; writes need `ADMIN` (catalog) or `ADMIN`/`BILLING` (customers,
-subscriptions, usage, invoices) — logging in as `support@acme.test` is the
-quickest way to see a `403`.
+subscriptions, usage, invoices, payments) — logging in as `support@acme.test` is
+the quickest way to see a `403`.
+
+Paying an invoice additionally requires an `Idempotency-Key` header:
+
+```
+POST /api/invoices/{id}/payments
+Authorization: Bearer <token>
+Idempotency-Key: <any unique string>
+
+{ "paymentMethod": "pm_card_visa" }
+```
+
+The fake provider recognises Stripe's own test payment-method ids, so the same
+requests work against either provider: `pm_card_visa` succeeds,
+`pm_card_visa_chargeDeclined` is declined, and the fake-only
+`pm_fake_provider_unavailable` simulates an unreachable provider.
 
 Example request files covering happy paths, validation errors,
 conflict/not-found, role denials, and tenant-isolation checks live in
@@ -219,17 +270,21 @@ conflict/not-found, role denials, and tenant-isolation checks live in
 
 This is also what runs in CI on every push/PR to `main` (see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Integration tests
-provision their own Postgres and MinIO via Testcontainers, so nothing needs to
-be running first — invoice totals, tenant isolation and PDF round trips are all
-verified against the real thing rather than mocks.
+provision their own Postgres, MinIO and stripe-mock via Testcontainers, so
+nothing needs to be running first — invoice totals, tenant isolation, PDF round
+trips, concurrent charge attempts and signed webhook settlement are all verified
+against the real thing rather than mocks.
 
 ---
 
 ## Project docs
 
-[`CLAUDE.md`](CLAUDE.md) is the living architecture and conventions doc for
-this project — data model, module conventions, current state, and the honest
-list of known gaps and next steps.
+[`CLAUDE.md`](CLAUDE.md) is the living architecture and conventions doc — data
+model, module conventions, and the rules each module follows.
+
+[`.claude/skills/subscription-hub-state/SKILL.md`](.claude/skills/subscription-hub-state/SKILL.md)
+holds the detailed current state: what is built, why each decision was made, and
+an honest list of known gaps and what is deliberately not done.
 
 ---
 
