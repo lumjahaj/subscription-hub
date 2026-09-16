@@ -18,4 +18,9 @@ public class AppUserRepositoryImpl implements AppUserRepository {
     public Optional<AppUserEntity> findByTenantIdAndEmail(String tenantId, String email) {
         return jpaRepository.findByTenantIdAndEmail(tenantId, email);
     }
+
+    @Override
+    public AppUserEntity save(AppUserEntity user) {
+        return jpaRepository.save(user);
+    }
 }

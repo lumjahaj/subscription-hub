@@ -36,6 +36,7 @@ class ProblemDetailsAdviceTest {
         assertThat(codeFor("uk_customer_tenant_email")).isEqualTo("CUSTOMER_ALREADY_EXISTS");
         assertThat(codeFor("uk_plan_tenant_code")).isEqualTo("PLAN_ALREADY_EXISTS");
         assertThat(codeFor("uk_plan_ent_tenant_plan_key")).isEqualTo("PLANENTITLEMENT_ALREADY_EXISTS");
+        assertThat(codeFor("tenant_pkey")).isEqualTo("TENANT_ALREADY_EXISTS");
     }
 
     @Test

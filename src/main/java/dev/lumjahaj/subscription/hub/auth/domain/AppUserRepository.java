@@ -17,4 +17,11 @@ public interface AppUserRepository {
      * tenantId is passed explicitly rather than read from the context.
      */
     Optional<AppUserEntity> findByTenantIdAndEmail(String tenantId, String email);
+
+    /**
+     * Used only by tenant provisioning, to create a new tenant's first
+     * administrator. The entity's tenantId must already be set: nothing
+     * fills it in from TenantContext, which is empty on a platform request.
+     */
+    AppUserEntity save(AppUserEntity user);
 }

@@ -37,7 +37,13 @@ public class ProblemDetailsAdvice {
             "uk_plan_tenant_code", "Plan",
             "uk_plan_ent_tenant_plan_key", "PlanEntitlement",
             "uk_invoice_tenant_number", "Invoice",
-            "uk_invoice_tenant_sub_period", "Invoice"
+            "uk_invoice_tenant_sub_period", "Invoice",
+            // The one primary key here: a tenant's id is its natural key
+            // (an assigned slug), so the PK is the uniqueness rule. Postgres's
+            // default name, left as-is — V4's renames exist because entities
+            // declared names the database didn't have, and TenantEntity
+            // declares none.
+            "tenant_pkey", "Tenant"
     );
 
     private ProblemDetail base(HttpStatus status, String code, String message) {

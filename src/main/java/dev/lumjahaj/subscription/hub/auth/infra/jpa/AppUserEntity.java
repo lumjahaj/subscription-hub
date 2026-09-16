@@ -64,10 +64,11 @@ public class AppUserEntity {
     private boolean enabled = true;
 
     // created_at / updated_at exist in the table (with DEFAULT now()) but
-    // are deliberately unmapped: nothing in the application writes to
-    // app_user — users are seeded — so there is no lifecycle for Java to
-    // manage, and ddl-auto: validate does not require every column to be
-    // mapped. Map them if a user-management endpoint ever lands.
+    // are deliberately unmapped: the only write is tenant provisioning
+    // inserting a tenant's first admin, where the column defaults are
+    // exactly right, and nothing ever updates a user. ddl-auto: validate
+    // does not require every column to be mapped. Map them when a
+    // user-management endpoint lands and rows start changing.
 
     // The codebase's first @ElementCollection. Roles are a value set owned
     // entirely by this user — no identity of their own, never queried
