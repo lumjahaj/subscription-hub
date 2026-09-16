@@ -293,6 +293,15 @@ three commits:
   Surefire's default `runOrder` is `filesystem`, which differs between Windows
   and Linux, so such a bug fails in a *different class* locally than on CI, and
   a green single-class run proves nothing.
+- **Pin every container image, and treat "works locally" as no evidence.** A
+  developer machine runs from its local image cache, so an image that has been
+  retagged, moved or deleted upstream keeps working locally and fails only on CI,
+  which always pulls. That is exactly what happened: MinIO's `minio/minio`
+  repository disappeared from Docker Hub, CI died with "repository does not
+  exist", and every local build stayed green. Images now come from
+  `quay.io/minio/minio` with a pinned `RELEASE.*` tag, and `stripe-mock` is
+  pinned too; `:latest` anywhere is the same bug waiting. `docker-compose.yml`
+  needs the same treatment as the test containers — a fresh clone pulls both.
 - Setup helpers assert the response status before calling `.getBody()`.
   Otherwise a problem+json body deserializes into the response record and
   surfaces as a confusing Jackson error (ProblemDetail's numeric `status` vs.
