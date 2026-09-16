@@ -67,7 +67,13 @@ import static org.assertj.core.api.Assertions.assertThat;
         // bytes, so without it every context fails to build - the same
         // trap billing.pdf.* hit. A fixed test secret also keeps tokens
         // reproducible across a run.
-        "auth.jwt.secret=test-only-jwt-secret-at-least-32-bytes-long"
+        "auth.jwt.secret=test-only-jwt-secret-at-least-32-bytes-long",
+        // Webhook verification needs only this secret — no API key, no
+        // network — so StripeWebhookIntegrationTest signs its own payloads
+        // and runs in this same context, with payment.provider still the
+        // fake. Here on the shared base, never a subclass: a differing
+        // property set is a different context-cache key.
+        "stripe.webhook-secret=whsec_test_only_webhook_signing_secret"
 })
 public abstract class AbstractIntegrationTest {
 

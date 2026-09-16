@@ -218,3 +218,44 @@ Idempotency-Key: outage-attempt-1
 {
   "paymentMethod": "pm_fake_provider_unavailable"
 }
+
+
+### --- STRIPE WEBHOOK ---
+### POST /api/webhooks/stripe is public and unauthenticated: the caller is
+### Stripe, which holds no token of ours. Its Stripe-Signature header is
+### what authenticates the request, so a request cannot be written by hand
+### here — the signature is an HMAC over the exact body plus a timestamp,
+### and Stripe's 5-minute tolerance means a pasted one expires.
+###
+### Where it is exercised instead:
+###   StripeWebhookIntegrationTest signs payloads with a test secret and
+###   covers success, decline, redelivery, a tampered body, a stale
+###   signature, unknown event types, and cross-tenant events.
+###
+### To drive it from real Stripe (needs an account, which this project
+### deliberately does not require):
+###   1. payment.provider=stripe and STRIPE_SECRET_KEY=sk_test_...
+###   2. stripe listen --forward-to localhost:8080/api/webhooks/stripe
+###   3. put the whsec_... it prints in STRIPE_WEBHOOK_SECRET and restart
+###   4. pay an invoice above: the response is PENDING, and the webhook
+###      flips it to SUCCEEDED a moment later
+###   5. stripe events resend <event-id> proves a duplicate changes nothing
+
+
+### Webhook — unsigned request (expects 400 WEBHOOK_SIGNATURE_INVALID).
+### The one webhook case worth having here: it proves the endpoint is
+### public but still refuses anything it cannot verify.
+POST {{baseUrl}}/api/webhooks/stripe
+Content-Type: application/json
+
+{
+  "id": "evt_manual_test",
+  "object": "event",
+  "type": "payment_intent.succeeded",
+  "data": {
+    "object": {
+      "id": "pi_manual_test",
+      "object": "payment_intent"
+    }
+  }
+}

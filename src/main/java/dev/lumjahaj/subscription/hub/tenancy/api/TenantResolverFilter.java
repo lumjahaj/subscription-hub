@@ -119,6 +119,10 @@ public class TenantResolverFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         return path.startsWith("/api/auth")
                 || path.startsWith("/api/health")
+                // A provider webhook carries no token, so there is no claim
+                // to read; its tenant comes from the signed event body and
+                // is established by PaymentWebhookService instead.
+                || path.startsWith("/api/webhooks")
                 || path.startsWith("/actuator")
                 || path.startsWith("/swagger-ui")
                 || path.startsWith("/v3/api-docs");

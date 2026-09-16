@@ -53,6 +53,12 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/auth/token").permitAll()
                         // Liveness probes run before anything can authenticate.
                         .requestMatchers("/api/health", "/actuator/health").permitAll()
+                        // Payment providers hold no token of ours. These
+                        // requests authenticate by signature instead, which
+                        // StripeWebhook verifies before anything is acted
+                        // on; an unverified body is refused there. Keep
+                        // TenantResolverFilter.shouldNotFilter in step.
+                        .requestMatchers(HttpMethod.POST, "/api/webhooks/**").permitAll()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         // Everything else under /actuator is platform
                         // infrastructure: authenticated at minimum, never
