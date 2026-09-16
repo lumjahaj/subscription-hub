@@ -18,6 +18,7 @@ public record InvoiceResponse(
         Instant periodEnd,
         Instant issuedAt,
         Instant dueAt,
+        Instant paidAt,
         List<InvoiceLineResponse> lines,
 
         // Whether GET /api/invoices/{id}/pdf will succeed. Deliberately a

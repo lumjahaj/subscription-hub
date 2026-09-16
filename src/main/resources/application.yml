@@ -51,6 +51,10 @@ billing:
     access-key: ${MINIO_ROOT_USER}
     secret-key: ${MINIO_ROOT_PASSWORD}
 
+payment:
+  # fake: in-process, no network or secrets - the default, and what tests use.
+  provider: fake
+
 management:
   endpoints:
     web:

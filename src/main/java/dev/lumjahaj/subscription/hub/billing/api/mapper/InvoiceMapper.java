@@ -28,6 +28,7 @@ public final class InvoiceMapper {
                 entity.getPeriodEnd(),
                 entity.getIssuedAt(),
                 entity.getDueAt(),
+                entity.getPaidAt(),
                 entity.getLines().stream().map(InvoiceMapper::toLineResponse).toList(),
                 entity.getPdfObjectKey() != null,
                 entity.getCreatedAt(),

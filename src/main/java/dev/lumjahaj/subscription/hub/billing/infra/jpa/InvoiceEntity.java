@@ -62,6 +62,11 @@ public class InvoiceEntity extends TenantScoped {
     @Column(name = "due_at")
     private Instant dueAt;
 
+    // Set by PaymentSettlementService when a payment for this invoice
+    // succeeds. NULL on every invoice that isn't PAID.
+    @Column(name = "paid_at")
+    private Instant paidAt;
+
     // Nullable by design: an invoice exists before its PDF does, because
     // PDF generation is decoupled from invoice generation so a storage
     // outage can't fail a billing run. NULL means "not generated yet".
@@ -113,6 +118,8 @@ public class InvoiceEntity extends TenantScoped {
     public void setIssuedAt(Instant issuedAt) { this.issuedAt = issuedAt; }
     public Instant getDueAt() { return dueAt; }
     public void setDueAt(Instant dueAt) { this.dueAt = dueAt; }
+    public Instant getPaidAt() { return paidAt; }
+    public void setPaidAt(Instant paidAt) { this.paidAt = paidAt; }
     public String getPdfObjectKey() { return pdfObjectKey; }
     public void setPdfObjectKey(String pdfObjectKey) { this.pdfObjectKey = pdfObjectKey; }
     public List<InvoiceLineEntity> getLines() { return lines; }

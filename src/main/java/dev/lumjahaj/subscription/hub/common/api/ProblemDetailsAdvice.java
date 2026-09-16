@@ -10,9 +10,12 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 
+import java.util.List;
 import java.util.Map;
 
 @ControllerAdvice
@@ -49,6 +52,26 @@ public class ProblemDetailsAdvice {
         var pd = base(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Validation failed");
         pd.setProperty("details", ex.getBindingResult().getAllErrors()
                 .stream().map(e -> e.getDefaultMessage()).toList());
+        return pd;
+    }
+
+    // Constraints on a @RequestHeader/@PathVariable parameter (rather than a
+    // @RequestBody) are enforced by Spring's built-in method validation,
+    // which throws this instead of MethodArgumentNotValidException.
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    ProblemDetail handleMethodValidation(HandlerMethodValidationException ex) {
+        var pd = base(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Validation failed");
+        pd.setProperty("details", ex.getAllErrors()
+                .stream().map(e -> e.getDefaultMessage()).toList());
+        return pd;
+    }
+
+    // A required header that is absent never reaches method validation.
+    // Without this it fell through to the catch-all as a 500.
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    ProblemDetail handleMissingHeader(MissingRequestHeaderException ex) {
+        var pd = base(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Validation failed");
+        pd.setProperty("details", List.of(ex.getHeaderName() + " header is required"));
         return pd;
     }
 

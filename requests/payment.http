@@ -1,0 +1,220 @@
+### --- PAYMENTS ---
+### Runs against the default fake provider (payment.provider=fake): no
+### network, no account. Payment methods are Stripe's own test ids, so the
+### same requests will work unchanged once the Stripe adapter exists:
+###   pm_card_visa                             succeeds
+###   pm_card_chargeDeclined                   fails, card_declined
+###   pm_card_chargeDeclinedInsufficientFunds  fails, insufficient_funds
+###   pm_fake_provider_unavailable             fake only: provider unreachable (503)
+###
+### Prerequisite: an OPEN invoice. Run billing.http through "Generate invoice
+### — after the period closes" first; it sets {{billingInvoiceId}}.
+### Every POST needs an Idempotency-Key header. {{$uuid}} generates a fresh
+### one per request; requests meant to replay reuse a fixed value instead.
+### Fixed keys are unique per tenant for the life of the database, so
+### against a fresh invoice change them (e.g. success-attempt-2), or the
+### first request returns 409 IDEMPOTENCY_KEY_REUSED.
+
+
+### Auth — acme admin
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth — demo admin, for the isolation checks
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+### Auth — acme support (read-only role)
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "support@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("supportToken", response.body.token);
+%}
+
+
+### Pay — missing Idempotency-Key (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Pay — blank payment method (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: {{$uuid}}
+
+{
+  "paymentMethod": ""
+}
+
+### Pay — support role (expects 403 ACCESS_DENIED)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{supportToken}}
+Idempotency-Key: {{$uuid}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Pay — tenant isolation: acme's invoice under demo
+### (expects 404 INVOICE_NOT_FOUND — must not leak or charge)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{demoToken}}
+Idempotency-Key: {{$uuid}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Pay — declined card (expects 201, status FAILED, failureCode card_declined;
+### the invoice stays OPEN)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: declined-attempt-1
+
+{
+  "paymentMethod": "pm_card_chargeDeclined"
+}
+
+### Pay — same Idempotency-Key, different payment method
+### (expects 409 IDEMPOTENCY_KEY_REUSED)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: declined-attempt-1
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Pay — succeeding card (expects 201, status SUCCEEDED, Location header).
+### Capture the payment id.
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: success-attempt-1
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+> {%
+    client.global.set("paymentId", response.body.id);
+%}
+
+### Pay — replay with the same Idempotency-Key (expects 200, the same payment
+### id as above, and no second payment row)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: success-attempt-1
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Pay — new key on an invoice that is now PAID (expects 409 INVOICE_NOT_PAYABLE)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: {{$uuid}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Invoice — expects status PAID and paidAt set
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}
+Authorization: Bearer {{acmeToken}}
+
+### List payments for the invoice — expects FAILED then SUCCEEDED
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Authorization: Bearer {{acmeToken}}
+
+### List payments — tenant isolation (expects 404 INVOICE_NOT_FOUND)
+GET {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Authorization: Bearer {{demoToken}}
+
+### Get payment by id — expects 200 SUCCEEDED
+GET {{baseUrl}}/api/payments/{{paymentId}}
+Authorization: Bearer {{acmeToken}}
+
+### Get payment by id — tenant isolation (expects 404 PAYMENT_NOT_FOUND)
+GET {{baseUrl}}/api/payments/{{paymentId}}
+Authorization: Bearer {{demoToken}}
+
+### Get payment — unknown id (expects 404 PAYMENT_NOT_FOUND)
+GET {{baseUrl}}/api/payments/00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{acmeToken}}
+
+
+### --- Provider outage ---
+### Needs a fresh OPEN invoice: re-run billing.http's setup for a new
+### subscription and invoice first, so {{billingInvoiceId}} points at it.
+
+### Pay — provider unavailable (expects 503 PAYMENT_PROVIDER_UNAVAILABLE;
+### the payment is left PENDING because the outcome is unknown)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: outage-attempt-1
+
+{
+  "paymentMethod": "pm_fake_provider_unavailable"
+}
+
+### Pay — another attempt while that one is PENDING
+### (expects 409 PAYMENT_IN_PROGRESS — it must not reach the provider)
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: {{$uuid}}
+
+{
+  "paymentMethod": "pm_card_visa"
+}
+
+### Pay — same key again: resubmits to the provider rather than replaying
+### PENDING, so with the fake still "down" this is 503 again
+POST {{baseUrl}}/api/invoices/{{billingInvoiceId}}/payments
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+Idempotency-Key: outage-attempt-1
+
+{
+  "paymentMethod": "pm_fake_provider_unavailable"
+}

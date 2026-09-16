@@ -43,6 +43,7 @@ class InvoiceMapperTest {
         invoice.setPeriodEnd(Instant.parse("2026-02-01T00:00:00Z"));
         invoice.setIssuedAt(Instant.parse("2026-02-01T00:05:00Z"));
         invoice.setDueAt(Instant.parse("2026-02-15T00:05:00Z"));
+        invoice.setPaidAt(Instant.parse("2026-02-03T10:00:00Z"));
         invoice.setCreatedAt(Instant.parse("2026-02-01T00:05:00Z"));
         invoice.setUpdatedAt(Instant.parse("2026-02-01T00:05:00Z"));
 
@@ -57,6 +58,7 @@ class InvoiceMapperTest {
         assertThat(response.totalCents()).isEqualTo(3249);
         assertThat(response.periodStart()).isEqualTo(invoice.getPeriodStart());
         assertThat(response.periodEnd()).isEqualTo(invoice.getPeriodEnd());
+        assertThat(response.paidAt()).isEqualTo(invoice.getPaidAt());
     }
 
     @Test
