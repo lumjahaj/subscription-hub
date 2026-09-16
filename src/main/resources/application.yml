@@ -29,6 +29,30 @@ spring:
       enabled: false
     livereload:
       enabled: false
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    properties:
+      mail:
+        smtp:
+          # Mailpit and SES's SMTP interface both accept plain SMTP on these
+          # ports in this setup; a real SES integration would enable
+          # STARTTLS and move to port 587 - a config change, not a code one.
+          auth: false
+          starttls:
+            enable: false
+  cloud:
+    aws:
+      region:
+        static: ${AWS_REGION:eu-central-1}
+      credentials:
+        # Static and empty-safe by default: ElasticMQ ignores credentials
+        # entirely, so a clean clone needs none to run the queue locally.
+        # Real SQS needs real ones, supplied the same way as everywhere else.
+        access-key: ${AWS_ACCESS_KEY_ID:test}
+        secret-key: ${AWS_SECRET_ACCESS_KEY:test}
+      sqs:
+        endpoint: ${SQS_ENDPOINT:http://localhost:9324}
 
 server:
   port: 8080
@@ -69,6 +93,14 @@ dunning:
   # subscription canceled. Each attempt costs a provider fee and irritates
   # the customer's bank, so this is deliberately finite.
   max-attempts: 4
+
+notification:
+  from: billing@subscription-hub.test
+  # How often the relay moves PENDING outbox rows onto the queue.
+  relay:
+    delay: 5000
+  sqs:
+    queue: notifications
 
 stripe:
   # Only read when payment.provider=stripe; StripeConfig then refuses to

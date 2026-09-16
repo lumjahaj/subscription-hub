@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <title th:text="${subject}">Your subscription has been canceled</title>
+</head>
+<body>
+<div th:replace="~{layout.html :: layout(~{::section})}">
+    <section>
+        <p>Hi <span th:text="${customerName}">Customer</span>,</p>
+        <p>
+            Your subscription has been canceled after repeated attempts to collect
+            payment for invoice <strong th:text="${invoiceNumber}">INV-000001</strong>
+            were unsuccessful.
+        </p>
+        <p>If you'd like to continue your service, please start a new subscription
+           or get in touch with us.</p>
+    </section>
+</div>
+</body>
+</html>

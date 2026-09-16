@@ -1,0 +1,10 @@
+Hi [[${customerName}]],
+
+Your subscription has been canceled after repeated attempts to collect
+payment for invoice [[${invoiceNumber}]] were unsuccessful.
+
+If you'd like to continue your service, please start a new subscription
+or get in touch with us.
+
+--
+This is an automated message - please do not reply to this email.

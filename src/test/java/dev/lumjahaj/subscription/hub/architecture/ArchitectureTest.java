@@ -29,7 +29,8 @@ class ArchitectureTest {
     static final String BASE = "dev.lumjahaj.subscription.hub";
 
     private static final List<String> FEATURE_MODULES =
-            List.of("auth", "tenancy", "catalog", "customer", "subscription", "usage", "billing", "payment", "dunning");
+            List.of("auth", "tenancy", "catalog", "customer", "subscription", "usage", "billing", "payment",
+                    "dunning", "notification");
 
     // Layer patterns are anchored to BASE so a third-party package that happens
     // to contain ".api." or ".infra." can never match as a dependency target.
@@ -106,18 +107,42 @@ class ArchitectureTest {
     // ---- 5. Vendor containment ----
 
     @ArchTest
-    static final ArchRule pdf_libraries_stay_in_billing_infra_pdf =
+    static final ArchRule pdf_rendering_library_stays_in_billing_infra_pdf =
             noClasses().that().resideOutsideOfPackage(BASE + ".billing.infra.pdf..")
-                    .should().dependOnClassesThat().resideInAnyPackage("org.thymeleaf..", "com.openhtmltopdf..")
-                    .because("Thymeleaf is a rendering detail, not a view layer; confining it to one adapter "
-                            + "keeps the renderer replaceable and stops anything else coupling to it");
+                    .should().dependOnClassesThat().resideInAPackage("com.openhtmltopdf..")
+                    .because("openhtmltopdf is a rendering detail, not a view layer; confining it to one "
+                            + "adapter keeps the renderer replaceable and stops anything else coupling to it");
+
+    @ArchTest
+    static final ArchRule thymeleaf_stays_in_the_two_template_adapters =
+            noClasses().that().resideOutsideOfPackage(BASE + ".billing.infra.pdf..")
+                    .and().resideOutsideOfPackage(BASE + ".notification.infra.template..")
+                    .should().dependOnClassesThat().resideInAPackage("org.thymeleaf..")
+                    .because("Thymeleaf is a rendering detail, not a view layer, used by two independent "
+                            + "renderers (invoice PDFs, notification emails); confining it to their adapter "
+                            + "packages keeps both replaceable and stops anything else coupling to it");
 
     @ArchTest
     static final ArchRule aws_sdk_stays_in_billing_infra_storage =
             noClasses().that().resideOutsideOfPackage(BASE + ".billing.infra.storage..")
-                    .should().dependOnClassesThat().resideInAPackage("software.amazon.awssdk..")
+                    .should().dependOnClassesThat().resideInAPackage("software.amazon.awssdk.services.s3..")
                     .because("the object-store vendor is meant to be a config value, which only holds "
                             + "while a single adapter knows the SDK exists");
+
+    @ArchTest
+    static final ArchRule sqs_stays_in_notification_infra_sqs =
+            noClasses().that().resideOutsideOfPackage(BASE + ".notification.infra.sqs..")
+                    .should().dependOnClassesThat().resideInAnyPackage(
+                            "software.amazon.awssdk.services.sqs..", "io.awspring.cloud..")
+                    .because("the queue is meant to be a config value (ElasticMQ locally, real SQS in "
+                            + "production, only the endpoint differs) - the same rule the S3 adapter follows");
+
+    @ArchTest
+    static final ArchRule mail_library_stays_in_notification_infra_mail =
+            noClasses().that().resideOutsideOfPackage(BASE + ".notification.infra.mail..")
+                    .should().dependOnClassesThat().resideInAnyPackage("jakarta.mail..", "org.springframework.mail..")
+                    .because("SMTP is a config value too (Mailpit locally, Amazon SES's SMTP interface in "
+                            + "production, only the host differs); one adapter is what keeps that true");
 
     @ArchTest
     static final ArchRule stripe_sdk_stays_in_payment_infra_gateway =

@@ -1,0 +1,10 @@
+Hi [[${customerName}]],
+
+We were unable to collect payment for invoice [[${invoiceNumber}]]
+([[${amount}]] [[${currency}]]).
+
+We'll try again on [[${nextAttemptDate}]]. No action is needed if your
+payment method is already up to date.
+
+--
+This is an automated message - please do not reply to this email.

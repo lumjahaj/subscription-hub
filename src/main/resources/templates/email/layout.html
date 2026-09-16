@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<!--
+    Shared chrome for every HTML email: inline styles and a table layout
+    only, no <style> block, no external CSS or images - Gmail and Outlook
+    strip or ignore most of the rest. Included by each concrete template via
+    th:replace="~{layout.html :: layout(~{::section})}", the vanilla-Thymeleaf
+    "pass a fragment as an argument" pattern - no layout-dialect dependency.
+-->
+<body>
+<div th:fragment="layout(content)">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="max-width:560px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
+        <tr>
+            <td style="padding:24px 24px 8px 24px;font-size:18px;font-weight:bold;color:#0f172a;">
+                Subscription Hub
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:0 24px 24px 24px;font-size:14px;line-height:1.6;">
+                <div th:replace="${content}">Content</div>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:16px 24px;border-top:1px solid #e2e8f0;font-size:12px;color:#64748b;">
+                This is an automated message - please do not reply to this email.
+            </td>
+        </tr>
+    </table>
+</div>
+</body>
+</html>

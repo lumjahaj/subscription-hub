@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <title th:text="${subject}">Your invoice is ready</title>
+</head>
+<body>
+<div th:replace="~{layout.html :: layout(~{::section})}">
+    <section>
+        <p>Hi <span th:text="${customerName}">Customer</span>,</p>
+        <p>
+            Invoice <strong th:text="${invoiceNumber}">INV-000001</strong> for
+            <strong th:text="${amount} + ' ' + ${currency}">0.00 USD</strong> is ready.
+            It's due by <span th:text="${dueDate}">2026-01-01</span>.
+        </p>
+        <p>The PDF is attached to this email.</p>
+    </section>
+</div>
+</body>
+</html>

@@ -32,6 +32,10 @@
         <openhtmltopdf.version>1.1.83</openhtmltopdf.version>
         <archunit.version>1.5.0</archunit.version>
         <stripe.version>33.4.2</stripe.version>
+        <!-- 3.4.x is the last Spring Cloud AWS line compatible with Spring
+             Boot 3.5.x / Spring Cloud 2025.0.x; 4.x requires Boot 4. -->
+        <spring-cloud-aws.version>3.4.2</spring-cloud-aws.version>
+        <awaitility.version>4.3.0</awaitility.version>
     </properties>
 
     <!--
@@ -145,6 +149,33 @@
             <version>${stripe.version}</version>
         </dependency>
 
+        <!--
+            Notification emails go out over SMTP - Mailpit locally, Amazon
+            SES's SMTP interface in production, a config value the same way
+            every other outside system is.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
+
+        <!--
+            The transport between the notification outbox and the mail
+            adapter: a relay publishes outbox rows to SQS, and a listener
+            consumes them. SQS replaces hand-written retry/backoff - a
+            failed message reappears after its visibility timeout, and a
+            redrive policy moves it to a dead-letter queue after too many
+            failures. ElasticMQ stands in for real SQS locally and in tests,
+            the same "code against the standard, keep the vendor a config
+            value" shape as MinIO/S3. Confined to notification/infra/sqs by
+            ArchitectureTest, like the AWS SDK and Stripe.
+        -->
+        <dependency>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-sqs</artifactId>
+            <version>${spring-cloud-aws.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-devtools</artifactId>
@@ -190,6 +221,17 @@
             <groupId>com.tngtech.archunit</groupId>
             <artifactId>archunit-junit5</artifactId>
             <version>${archunit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            Notification delivery is asynchronous (relay -> SQS -> listener),
+            so integration tests poll for it rather than asserting
+            immediately after a call returns.
+        -->
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <version>${awaitility.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>

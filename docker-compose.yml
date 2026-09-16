@@ -52,6 +52,34 @@ services:
     volumes:
       - minio_data:/data
 
+  # Local SMTP inbox for notification emails. Mailpit is the maintained
+  # successor to MailHog (unmaintained, no releases in years) and keeps the
+  # same ports: 1025 for SMTP, 8025 for the web inbox its REST API also
+  # serves. Stands in for Amazon SES's SMTP interface, which is only a host
+  # change away.
+  mailpit:
+    image: axllent/mailpit:v1.31.1
+    container_name: subscription-hub-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  # Local SQS. The notification outbox is relayed here and a listener
+  # consumes it; ElasticMQ speaks the SQS API, so real SQS is only an
+  # endpoint change, the same "vendor is a config value" shape as MinIO/S3.
+  # Queues are defined in elasticmq.conf as infrastructure, not created by
+  # the application.
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.6.16
+    container_name: subscription-hub-elasticmq
+    restart: unless-stopped
+    ports:
+      - "9324:9324"
+      - "9325:9325"
+    volumes:
+      - ./docker/elasticmq/elasticmq.conf:/opt/elasticmq.conf:ro
+
 volumes:
   postgres_data:
   minio_data:

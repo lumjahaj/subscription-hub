@@ -1,0 +1,9 @@
+Hi [[${customerName}]],
+
+Invoice [[${invoiceNumber}]] for [[${amount}]] [[${currency}]] is ready.
+It's due by [[${dueDate}]].
+
+The PDF is attached to this email.
+
+--
+This is an automated message - please do not reply to this email.
