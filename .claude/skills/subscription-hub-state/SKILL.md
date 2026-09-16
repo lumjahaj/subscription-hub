@@ -273,13 +273,89 @@ description: What is built in Subscription Hub, why each decision was made, and 
   - Seeded dev logins (`admin@acme.test`, `admin@demo.test`, `support@acme.test`,
     password `subscriptionhub`) live in `db/seed` under the `dev` profile, not in
     `db/migration` — see CLAUDE.md §5.
+- **Payments** — `payment/` module, and the first thing to move an invoice off
+  `OPEN`: `POST /api/invoices/{id}/payments` settles it `PAID`.
+  - **Shaped after Stripe's PaymentIntent + webhook model from the start**, before
+    any Stripe code existed. `PaymentGateway.createPayment` returns only the
+    provider's reference, never the outcome; the outcome arrives as a
+    `PaymentEvent` and `PaymentSettlementService` is the only code that acts on
+    one. A synchronous "charge and tell me the result" port would have been
+    simpler and would have had to be rebuilt the day a real provider landed.
+  - **Three steps around one remote call** (`PaymentService`): reserve a `PENDING`
+    payment in a short transaction (amount and currency copied from the invoice,
+    never from the request), call the provider with no transaction open, record the
+    reference in a second. Deliberately not `@Transactional` — the same rule that
+    keeps PDF rendering out of the billing transaction, plus the fact that a
+    rollback cannot un-charge a card.
+  - **Double-charge prevention is structural**: `ux_payment_invoice_in_flight_or_succeeded`
+    (partial unique index, V11) allows one `PENDING`-or-`SUCCEEDED` payment per
+    invoice. The code checks the invoice is `OPEN` first, but two concurrent
+    requests both pass that check; the index is what makes the loser fail before
+    reaching the provider. A 10-thread test asserts exactly one charge, mirroring
+    the usage-counter and invoice concurrency proofs.
+  - **`Idempotency-Key` is required, not generated.** It replays the first result
+    (200 rather than 201), refuses reuse for a different invoice or method
+    (409 `IDEMPOTENCY_KEY_REUSED`), and — the reason it is mandatory — is the only
+    way to *resume* a payment the provider never acknowledged: a provider outage
+    leaves the payment `PENDING`, which blocks the invoice's in-flight slot until
+    the same key resubmits it. Our payment id doubles as the provider's idempotency
+    key, so the resubmission cannot charge twice.
+  - **Settlement is idempotent by state, not by a table of processed event ids.**
+    Only a `PENDING` payment settles, and it settles once, so duplicates, late
+    deliveries and out-of-order events (all three of which providers explicitly do
+    not rule out) change nothing. A `processed_event` table was planned and dropped:
+    it would have added a third native query for behaviour the state machine already
+    guarantees. It becomes necessary only for events that aren't naturally
+    idempotent — refunds, disputes — which don't exist here.
+  - **Two adapters, one settlement path.** `FakePaymentGateway` (default,
+    `payment.provider=fake`) is deterministic from the payment method and uses
+    *Stripe's own test ids* (`pm_card_visa`, `pm_card_visa_chargeDeclined`,
+    `pm_card_visa_chargeDeclinedInsufficientFunds`, plus a fake-only
+    `pm_fake_provider_unavailable`), so the same `.http` requests work against
+    either provider. It delivers its event before returning, which means every
+    fake payment also exercises the awkward real-world ordering: an event arriving
+    before the create call's reference has been stored. That works because events
+    match on *our* payment id from metadata, not the provider's reference.
+  - **`StripePaymentGateway`** (`payment.provider=stripe`) creates and confirms a
+    PaymentIntent in one call with `off_session` and `error_on_requires_action`
+    (no UI exists to answer a 3-D Secure challenge, so failing fast beats parking
+    a payment that would hold the invoice's slot forever) and
+    `allow_redirects=never` (otherwise Stripe demands a `return_url`). A
+    `CardException` is **not** treated as a gateway failure: the PaymentIntent
+    exists and its webhook will settle it FAILED, so the adapter returns the
+    intent's id. Only an unreachable provider raises `PaymentGatewayException`.
+  - **`POST /api/webhooks/stripe`** is public and unauthenticated — the caller holds
+    no token of ours — so the signature *is* the authentication, and
+    `permitAll` in `SecurityConfig` is matched by an entry in
+    `TenantResolverFilter.shouldNotFilter`. The body is taken as a raw `String`:
+    the signature covers exact bytes, so letting Jackson parse and re-serialize
+    would break verification. Unknown event types and PaymentIntents without our
+    metadata get 200 and are ignored, because a provider retries every non-2xx for
+    days; only an unverifiable signature is a 400.
+  - **The webhook's tenancy problem**, and the one genuine surprise in this work:
+    with `open-in-view`, the request's Hibernate session opens before the tenant is
+    knowable (it is inside the signed body), pinning every query to the
+    `__no_tenant__` sentinel. `PROPAGATION_REQUIRES_NEW` does not fix it — with no
+    active transaction there is nothing to suspend, so the new transaction adopts
+    the bound `EntityManager`. `PaymentWebhookService` unbinds it, sets the tenant,
+    settles in a fresh session, and rebinds. Caught by a test, not by reading.
+  - **No Stripe account exists**, and none is needed: Stripe supports neither
+    Kosovo nor Albania, and the signup country is permanent and must match a real
+    entity there. `StripePaymentGatewayTest` runs the real SDK against
+    `stripe-mock` in a container (a plain JUnit test, no Spring context, so it
+    neither forks the context cache nor needs the Stripe profile), and
+    `StripeWebhookIntegrationTest` signs its own payloads with a test
+    `whsec_` secret — verification is HMAC, so the production path runs unchanged.
+    This is why the Stripe adapter has CI coverage that a real-account integration
+    could never have.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
   `..infra..` beyond the `*Entity` carve-out below, `common` never depends on
   a feature module, Spring Data types stay behind `..infra.jpa..`, the domain
   stays free of `jakarta.persistence`, Thymeleaf/openhtmltopdf/the AWS SDK
-  each stay inside their one adapter package, `*Controller`/`*RepositoryImpl`/
+  each stay inside their one adapter package (the Stripe SDK too, confined to
+  `payment.infra.gateway`), `*Controller`/`*RepositoryImpl`/
   `*Entity` sit where their name says, no cycles between feature-module
   slices, and no field-level `@Autowired`. Pure bytecode analysis — no Spring
   context, no containers — so it runs in milliseconds alongside the unit
@@ -312,6 +388,9 @@ POST GET      /api/subscriptions/{subscriptionId}/invoices
 GET            /api/invoices[?subscriptionId=]
 GET            /api/invoices/{id}
 POST GET      /api/invoices/{id}/pdf
+POST GET      /api/invoices/{id}/payments   (POST needs an Idempotency-Key header)
+GET            /api/payments/{id}
+POST          /api/webhooks/stripe          (public; authenticated by signature)
 ```
 
 ---
@@ -404,12 +483,10 @@ feature module does.
 - `audit_event` table exists but nothing writes to it. No longer *blocked*,
   though: it needed an authenticated principal to record in its `actor` column,
   and there now is one — which is why CLAUDE.md §7 moved it after authentication.
-- Only `InvoiceStatus.OPEN` is ever set — `DRAFT`, `PAID`, `VOID`, and
-  `UNCOLLECTIBLE` are declared (they must match the Postgres enum exactly)
-  but nothing in the code produces them yet. Deliberate: better an
-  honestly-unused enum value than an invented lifecycle with no logic
-  behind it. `PAID`/`VOID`/`UNCOLLECTIBLE` arrive with payments and
-  dunning.
+- ~~Only `InvoiceStatus.OPEN` is ever set~~ — partly closed: payments produce
+  `PAID`. `DRAFT`, `VOID` and `UNCOLLECTIBLE` remain declared and unreachable,
+  still deliberately: `VOID` needs a cancellation path and `UNCOLLECTIBLE`
+  belongs to dunning.
 - No update or delete on invoices either, same as everywhere else — an
   invoice is additionally meant to be immutable once issued (see Current state), so
   "no update" here is a stronger property than the same gap on Product/
@@ -439,6 +516,35 @@ feature module does.
   dependencies, but there is **no test for the storage failure path** — e.g.
   that `BillingCycleJob` really does continue when MinIO is unreachable. That
   behaviour is asserted only by reading the code.
+
+**Payments**
+
+- **A stuck `PENDING` payment blocks its invoice, and nothing cleans it up.** If
+  the provider is unreachable (or the app dies between the reserve and the
+  provider call), the payment stays `PENDING` and the partial unique index refuses
+  every other attempt on that invoice. Retrying with the same `Idempotency-Key`
+  resumes it — that is why the header is mandatory — but a caller who loses the key
+  has no route back, and there is no reconciliation job that asks the provider what
+  happened to old pending payments. That job is the honest next step for this
+  module, and the first thing a real system would add.
+- **Nothing charges automatically.** `BillingCycleJob` invoices and renews but
+  never pays, and `customer` has no stored payment method — the method comes from
+  the request body. Both arrive with dunning, which needs to retry on its own.
+- **No refunds, disputes, partial payments or multi-currency settlement.** The
+  payment amount is always the invoice total in the invoice's currency. Refunds
+  and disputes are also the point at which settlement's state-based idempotency
+  stops being sufficient and a processed-event table becomes necessary.
+- **Stripe's minimum charge is $0.50** (or equivalent). An invoice below it would
+  be rejected by the real API; nothing validates this before calling, and
+  `stripe-mock` accepts anything, so no test catches it.
+- **The Stripe adapter has never run against real Stripe.** `stripe-mock` verifies
+  the request shape and the response parsing, and it always succeeds — so declines,
+  3-D Secure, rate limits and real webhook delivery are exercised only by the fake
+  and by hand-signed payloads. Worth stating plainly rather than implying the
+  integration is proven end to end.
+- **No webhook endpoint for anything but payments**, and no event replay tooling:
+  if the app is down for longer than the provider's retry window, those events are
+  simply lost, and only the reconciliation job above would notice.
 
 **Authentication and authorization**
 

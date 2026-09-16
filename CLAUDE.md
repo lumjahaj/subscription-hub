@@ -39,7 +39,7 @@ Read these before suggesting anything.
 Java 21 · Spring Boot 3.5.6 · Maven · Spring Web / Data JPA / Validation /
 Security · Hibernate 6 · PostgreSQL 17 · Flyway · Testcontainers · Docker Compose ·
 springdoc-openapi 2.8.x · MinIO (invoice PDFs) · AWS SDK v2 for S3 ·
-openhtmltopdf + Thymeleaf
+openhtmltopdf + Thymeleaf · stripe-java (payments)
 
 The object store is reached with the **AWS SDK, not the MinIO client** — MinIO is
 S3-compatible, so the vendor stays a config value and the same adapter works
@@ -49,6 +49,14 @@ Thymeleaf is present as a **library only** (`org.thymeleaf:thymeleaf`), never
 `spring-boot-starter-thymeleaf`: it renders the invoice HTML that openhtmltopdf
 turns into a PDF. This is a pure JSON API with no MVC view layer, and the starter
 would wire one in.
+
+The payment provider is a config value the same way: `payment.provider=fake`
+(the default — in-process, deterministic, no network) or `stripe`. Both sit behind
+`PaymentGateway`, and both settle through one `PaymentEvent` path, so the fake is
+not a stub but the same shape as the real thing. **No Stripe account exists or is
+needed**: Stripe supports neither Kosovo nor Albania, so the adapter is tested
+against `stripe-mock` (Stripe's own local server, as a container) and the webhook
+against payloads the tests sign themselves.
 
 Authentication is **self-issued HS256 JWTs**, validated by
 `spring-boot-starter-oauth2-resource-server` (which had been on the classpath
@@ -87,6 +95,7 @@ customer/        api, app, domain, infra/jpa
 subscription/    api, app, domain, infra/jpa
 usage/           api, app, domain, infra/jpa
 billing/         api, app, domain, infra/{jpa, pdf, storage}
+payment/         api, app, domain, infra/{jpa, gateway}
 audit/           (not built)
 ```
 
@@ -178,6 +187,18 @@ a native/`nativeQuery = true` one. There are now two of those —
 `UsageCounterJpaRepository.upsertAndIncrement` and
 `InvoiceJpaRepository.allocateNextNumber` (see Current state in the subscription-hub-state skill) — and `tenantId` is bound
 explicitly in both for exactly this reason.
+
+**A provider webhook has the same chicken-and-egg, from the other side.**
+`POST /api/webhooks/stripe` carries no token, so `TenantContext` is empty when
+`spring.jpa.open-in-view` opens the request's `EntityManager`, and Hibernate
+resolves `@TenantId` *at session open* — pinning every query to the
+`__no_tenant__` sentinel. The tenant is only knowable after the signature
+verifies, from the event's metadata. `PaymentWebhookService` therefore unbinds
+the request's `EntityManager`, sets the tenant, and runs settlement in a
+transaction that opens a fresh session, rebinding afterwards.
+`PROPAGATION_REQUIRES_NEW` looks like the fix and is not: suspension only happens
+when a transaction is already active, and open-in-view binds an `EntityManager`
+without one, so the new transaction simply adopts it — sentinel tenant included.
 
 **`AppUserEntity` is the one tenant-owned entity that does not extend
 `TenantScoped`**, so it gets no `@TenantId` predicate. This is a chicken-and-egg,
@@ -324,6 +345,27 @@ subscription-hub-state skill.
   stay inside the tenant-scoped request path; object keys are storage layout, not
   a security boundary, and never appear in a response.
 
+**Payment invariants** — money moves here, and each of these looks like tidying.
+Full reasoning under Current state in the subscription-hub-state skill.
+- **One place settles money.** `PaymentSettlementService` is the only code that
+  moves a payment off `PENDING` or an invoice to `PAID`, and it only ever acts on
+  a `PaymentEvent`. Both providers reach it the same way; a second settlement path
+  would be a second thing to get wrong, and only one of them would be tested.
+- **The provider call never runs inside a transaction** (same rule as the invoice
+  PDF): reserve in one short transaction, call the provider with none open,
+  record in a second.
+- **Idempotency is the caller's key plus a partial unique index.** The
+  `Idempotency-Key` header is required, is passed to the provider as our payment
+  id, and is the only way to resume a payment the provider never acknowledged.
+  `ux_payment_invoice_in_flight_or_succeeded` allows one PENDING-or-SUCCEEDED
+  payment per invoice — the thing that actually prevents a double charge.
+- **Settlement is idempotent by state, not by remembering event ids.** Only a
+  PENDING payment settles, so redelivered, duplicated and out-of-order events are
+  no-ops. Providers guarantee none of those three.
+- **A decline is not a provider outage.** A declined card still produced a real
+  payment at the provider, so the adapter records the reference and lets the
+  event settle it FAILED; only an unreachable provider leaves a payment PENDING.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
 
@@ -369,7 +411,11 @@ tenant (id varchar(64) PK — slug)
  │    ├── subscription_entitlement_override
  │    └── usage_counter
  ├── invoice → invoice_line   (unique tenant_id + subscription_id + period_start; period_start/end added in V6;
- │                              pdf_object_key nullable — renamed from pdf_url in V7, holds an object key not a URL)
+ │        │                     pdf_object_key nullable — renamed from pdf_url in V7, holds an object key not a URL;
+ │        │                     paid_at added in V11)
+ │        └── payment      (V11; unique tenant_id + idempotency_key, plus the partial unique index
+ │                          ux_payment_invoice_in_flight_or_succeeded on (tenant_id, invoice_id)
+ │                          WHERE status IN ('PENDING','SUCCEEDED') — one charge per invoice)
  └── audit_event
 
 invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
@@ -378,8 +424,9 @@ invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
 Postgres enums: `subscription_status` (`TRIALING`, `ACTIVE`, `PAST_DUE`,
 `CANCELED`, plus `PAUSED` added in V2), `plan_interval_unit` (`MONTH`, `YEAR`,
 added in V3, replacing the old `plan.interval` string column), `invoice_status`
-(`DRAFT`, `OPEN`, `PAID`, `VOID`, `UNCOLLECTIBLE` — only `OPEN` is producible
-today, see Current state in the subscription-hub-state skill).
+(`DRAFT`, `OPEN`, `PAID`, `VOID`, `UNCOLLECTIBLE` — `OPEN` and, since payments,
+`PAID` are producible; see Current state in the subscription-hub-state skill),
+`payment_status` (`PENDING`, `SUCCEEDED`, `FAILED`, added in V11).
 
 Seeded tenants for local dev: `acme`, `demo`.
 
@@ -388,10 +435,11 @@ Seeded tenants for local dev: `acme`, `demo`.
 ## 7. Roadmap
 
 Subscription state transitions (cancel/pause/resume), renewal processing,
-usage metering, billing/invoice calculation, invoice PDFs (MinIO), and
-JWT authentication + RBAC are done — see the subscription-hub-state skill.
+usage metering, billing/invoice calculation, invoice PDFs (MinIO),
+JWT authentication + RBAC, and payments (fake + Stripe adapters, webhook
+settlement) are done — see the subscription-hub-state skill.
 
-Next: Mock payments → Dunning (`PAST_DUE`) → Notifications (MailHog — the PDF
+Next: Dunning (`PAST_DUE`) → Notifications (MailHog — the PDF
 is the attachment, which is why it came first) →
 **Tenant provisioning (platform-admin API)** → Audit events → Observability
 (Actuator, Micrometer, Prometheus, Grafana).
