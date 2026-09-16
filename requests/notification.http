@@ -1,0 +1,121 @@
+### --- NOTIFICATIONS ---
+### Notification has no endpoints of its own: like dunning, it is an outbox
+### relayed to a queue (notification.relay.delay, every 5s by default) and a
+### listener that delivers over SMTP. What it does is visible through the
+### customer's inbox (Mailpit, http://localhost:8025) and the queue itself
+### (ElasticMQ's stats, http://localhost:9325), not through this app's API.
+###
+### To see all three emails without waiting for real billing/dunning cycles:
+###   1. create a product/plan/customer/subscription and force the period
+###      closed in psql (below, or see billing.http)
+###   2. generate the invoice (below) - this enqueues the invoice-issued
+###      email; the relay picks it up within 5s, and it shows up in Mailpit
+###      with the PDF attached (rendered on delivery if BillingCycleJob
+###      hasn't already run)
+###   3. store pm_card_visa_chargeDeclined on the customer (see dunning.http),
+###      then run DunningJob (via the cron, or DUNNING_CYCLE_CRON as an
+###      environment variable - see dunning.http for why not run.arguments)
+###      - the first failure enqueues the payment-failed email
+###   4. push dunning_state.attempt_count to 3 and next_attempt_at into the
+###      past (see dunning.http), then let the job run again - exhausting
+###      the attempts enqueues the subscription-canceled email
+###
+### Queue depth and the dead-letter queue are visible at
+### http://localhost:9325/statistics/queues - a message only ever appears on
+### notifications-dlq after 5 failed deliveries (elasticmq.conf's
+### maxReceiveCount).
+
+
+### Auth — acme admin
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+
+### Setup — Product
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "code": "notification-demo-product",
+  "name": "Notification Demo Product"
+}
+
+### Setup — Plan (no trial, so the subscription starts ACTIVE)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "productCode": "notification-demo-product",
+  "code": "notification-demo-plan",
+  "name": "Notification Demo Plan",
+  "intervalUnit": "MONTH",
+  "amountCents": 2999,
+  "currency": "USD"
+}
+
+### Setup — Customer. Capture the id; this is whose inbox you'll watch.
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "email": "notification-demo@acme.test",
+  "name": "Notification Demo Customer"
+}
+
+> {%
+    client.global.set("notificationCustomerId", response.body.id);
+%}
+
+### Setup — Subscription. Capture the id.
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "customerId": "{{notificationCustomerId}}",
+  "planCode": "notification-demo-plan"
+}
+
+> {%
+    client.global.set("notificationSubId", response.body.id);
+%}
+
+### Force the period closed - psql (or pgAdmin, localhost:8081):
+###   UPDATE subscription SET current_period_end = now() - interval '1 day'
+###   WHERE id = '<notificationSubId>';
+
+
+### Invoice-issued email — generates the invoice, which enqueues the email.
+### Wait ~5s for the relay, then check Mailpit: http://localhost:8025
+### (expects 201; the PDF isn't generated yet at this point - the listener
+### renders it itself before attaching, since BillingCycleJob hasn't run)
+POST {{baseUrl}}/api/subscriptions/{{notificationSubId}}/invoices
+Authorization: Bearer {{acmeToken}}
+
+> {%
+    client.global.set("notificationInvoiceId", response.body.id);
+%}
+
+
+### --- Watching delivery without opening a browser ---
+### These hit Mailpit's own REST API directly, not this application's.
+
+### Every message currently in the inbox (newest last is not guaranteed -
+### Mailpit returns newest first)
+GET http://localhost:8025/api/v1/messages
+
+### Queue depth for notifications / notifications-dlq
+GET http://localhost:9325/statistics/queues
