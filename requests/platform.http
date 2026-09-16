@@ -1,0 +1,177 @@
+### Platform auth — log in as the seeded platform administrator.
+### Seeded by db/seed V9002 under the dev profile only. The token carries
+### roles=[PLATFORM_ADMIN] and deliberately no tenant_id.
+POST {{baseUrl}}/api/platform/auth/token
+Content-Type: application/json
+
+{
+  "email": "platform@subscriptionhub.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("platformToken", response.body.token);
+%}
+
+### Tenant auth — acme's seeded admin, used for the cross-direction checks below.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+
+### Provision a tenant — happy path (expects 201 + Location)
+# The id embeds a timestamp so the file can be re-run without a 409.
+# initialPassword is shown exactly once, here; GET never returns it again.
+POST {{baseUrl}}/api/platform/tenants
+Content-Type: application/json
+Authorization: Bearer {{platformToken}}
+
+{
+  "id": "globex-{{$timestamp}}",
+  "name": "Globex Corporation",
+  "adminEmail": "admin@globex.test"
+}
+
+> {%
+    client.global.set("newTenantId", response.body.tenant.id);
+    client.global.set("newAdminEmail", response.body.adminEmail);
+    client.global.set("newAdminPassword", response.body.initialPassword);
+%}
+
+### Log in as the new tenant's admin with the generated password (expects 200)
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "{{newTenantId}}",
+  "email": "{{newAdminEmail}}",
+  "password": "{{newAdminPassword}}"
+}
+
+> {%
+    client.global.set("newTenantToken", response.body.token);
+%}
+
+### New tenant is usable — create a product in it (expects 201)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+Authorization: Bearer {{newTenantToken}}
+
+{
+  "code": "starter",
+  "name": "Starter"
+}
+
+### New tenant is isolated — it sees only its own product, none of acme's
+GET {{baseUrl}}/api/products
+Authorization: Bearer {{newTenantToken}}
+
+
+### Get a tenant (expects 200, no initialPassword in the body)
+GET {{baseUrl}}/api/platform/tenants/{{newTenantId}}
+Authorization: Bearer {{platformToken}}
+
+### List tenants (paged, sorted by id)
+GET {{baseUrl}}/api/platform/tenants?page=0&size=20
+Authorization: Bearer {{platformToken}}
+
+### Get a tenant — unknown id (expects 404 TENANT_NOT_FOUND)
+GET {{baseUrl}}/api/platform/tenants/no-such-tenant
+Authorization: Bearer {{platformToken}}
+
+
+### Provision — duplicate id (expects 409 TENANT_ALREADY_EXISTS)
+# acme already exists. Also proves a create can never overwrite an existing
+# tenant: acme's name is still "Acme Inc." afterwards (check with GET below).
+POST {{baseUrl}}/api/platform/tenants
+Content-Type: application/json
+Authorization: Bearer {{platformToken}}
+
+{
+  "id": "acme",
+  "name": "Hijacked",
+  "adminEmail": "evil@example.com"
+}
+
+### acme is untouched after the refused create (expects name "Acme Inc.")
+GET {{baseUrl}}/api/platform/tenants/acme
+Authorization: Bearer {{platformToken}}
+
+### Provision — invalid slug (expects 400 VALIDATION_ERROR)
+# Uppercase and underscores are rejected; underscores being excluded is also
+# what makes the __no_tenant__ sentinel impossible to provision.
+POST {{baseUrl}}/api/platform/tenants
+Content-Type: application/json
+Authorization: Bearer {{platformToken}}
+
+{
+  "id": "Not_A_Slug",
+  "name": "Invalid",
+  "adminEmail": "admin@invalid.test"
+}
+
+### Provision — missing fields and bad email (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/platform/tenants
+Content-Type: application/json
+Authorization: Bearer {{platformToken}}
+
+{
+  "id": "",
+  "adminEmail": "not-an-email"
+}
+
+
+### Deactivate the new tenant (expects 200, active=false)
+POST {{baseUrl}}/api/platform/tenants/{{newTenantId}}/deactivate
+Authorization: Bearer {{platformToken}}
+
+### The new tenant's existing, unexpired token stops working (expects 401 TENANT_UNKNOWN)
+# TenantResolverFilter re-checks the tenant on every request rather than
+# trusting the token, so deactivation needs no token revocation.
+GET {{baseUrl}}/api/products
+Authorization: Bearer {{newTenantToken}}
+
+### Deactivate again — idempotent (expects 200, not 409)
+POST {{baseUrl}}/api/platform/tenants/{{newTenantId}}/deactivate
+Authorization: Bearer {{platformToken}}
+
+### Activate (expects 200, active=true)
+POST {{baseUrl}}/api/platform/tenants/{{newTenantId}}/activate
+Authorization: Bearer {{platformToken}}
+
+### The same token works again (expects 200)
+GET {{baseUrl}}/api/products
+Authorization: Bearer {{newTenantToken}}
+
+
+### Isolation — a tenant ADMIN cannot use the platform API (expects 403 ACCESS_DENIED)
+GET {{baseUrl}}/api/platform/tenants
+Authorization: Bearer {{acmeToken}}
+
+### Isolation — a platform token cannot use tenant endpoints (expects 403 ACCESS_DENIED)
+# 403 rather than 400 TENANT_MISSING: the caller is authenticated, just not
+# as anyone a tenant endpoint serves.
+GET {{baseUrl}}/api/products
+Authorization: Bearer {{platformToken}}
+
+### No token (expects 401 UNAUTHENTICATED)
+GET {{baseUrl}}/api/platform/tenants
+
+### Platform login — a tenant admin's credentials (expects 401 INVALID_CREDENTIALS)
+# Same password, a real account — but in app_user, not platform_user.
+POST {{baseUrl}}/api/platform/auth/token
+Content-Type: application/json
+
+{
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
