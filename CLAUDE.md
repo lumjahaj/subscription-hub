@@ -39,7 +39,8 @@ Read these before suggesting anything.
 Java 21 · Spring Boot 3.5.6 · Maven · Spring Web / Data JPA / Validation /
 Security · Hibernate 6 · PostgreSQL 17 · Flyway · Testcontainers · Docker Compose ·
 springdoc-openapi 2.8.x · MinIO (invoice PDFs) · AWS SDK v2 for S3 ·
-openhtmltopdf + Thymeleaf · stripe-java (payments)
+openhtmltopdf + Thymeleaf · stripe-java (payments) · Spring Cloud AWS SQS +
+ElasticMQ (notifications) · spring-boot-starter-mail + Mailpit (email)
 
 The object store is reached with the **AWS SDK, not the MinIO client** — MinIO is
 S3-compatible, so the vendor stays a config value and the same adapter works
@@ -47,8 +48,18 @@ against real S3/R2 by changing an endpoint.
 
 Thymeleaf is present as a **library only** (`org.thymeleaf:thymeleaf`), never
 `spring-boot-starter-thymeleaf`: it renders the invoice HTML that openhtmltopdf
-turns into a PDF. This is a pure JSON API with no MVC view layer, and the starter
-would wire one in.
+turns into a PDF, and — the same library, a second private `TemplateEngine` —
+the HTML/text notification emails. This is a pure JSON API with no MVC view
+layer, and the starter would wire one in.
+
+Notification delivery is a transactional outbox relayed to SQS: a billing or
+dunning change and the outbox row it produces commit together (you cannot
+commit a database row and publish to a queue in one atomic step — the
+dual-write problem), and a relay job moves `PENDING` rows onto the queue for a
+listener to send. SQS is reached the same way as the object store: **ElasticMQ
+stands in for it locally and in tests**, and only the endpoint differs in
+production. SMTP is the same shape again — **Mailpit locally, Amazon SES's SMTP
+interface in production.**
 
 The payment provider is a config value the same way: `payment.provider=fake`
 (the default — in-process, deterministic, no network) or `stripe`. Both sit behind
@@ -65,7 +76,7 @@ same process; an external IdP would use RSA + JWKS and change only `issuer-uri`,
 since the verification side is already the standard machinery — the same
 "code against the standard, keep the provider a config value" shape as MinIO/S3.
 
-Planned: Redis, MailHog/Mailpit, WireMock, Micrometer, Prometheus, Grafana.
+Planned: Redis, WireMock, Micrometer, Prometheus, Grafana.
 
 **Free, and runnable from a clean clone.** Nothing requires a paid service. With
 only Docker, the app boots and the full test suite passes offline, with no
@@ -97,13 +108,17 @@ usage/           api, app, domain, infra/jpa
 billing/         api, app, domain, infra/{jpa, pdf, storage}
 payment/         api, app, domain, infra/{jpa, gateway}
 dunning/         app, domain, infra/jpa  (no api — it is a job, not endpoints)
+notification/    app, domain, infra/{jpa, sqs, mail, template}  (no api — an
+                 outbox relay and a queue consumer, not endpoints)
 audit/           (not built)
 ```
 
-`billing` is the first module with more than one `infra` package. `infra/jpa`
-adapts the database, `infra/storage` adapts the object store, and `infra/pdf`
-adapts the rendering library — three different outside systems, each behind its
-own port, rather than one catch-all `infra`.
+`billing` was the first module with more than one `infra` package; `notification`
+now has the most. `infra/jpa` adapts the database, `infra/storage` adapts the
+object store, `infra/pdf` adapts the rendering library (billing), and
+`infra/sqs`, `infra/mail`, `infra/template` adapt the queue, SMTP and the
+second Thymeleaf renderer (notification) — each outside system behind its own
+port, rather than one catch-all `infra`.
 
 Dependency direction: **`api → app → domain ← infra`**
 
@@ -308,6 +323,34 @@ three commits:
   surfaces as a confusing Jackson error (ProblemDetail's numeric `status` vs.
   an enum field) hundreds of log lines from the real cause.
 
+**Spring Cloud AWS SQS + Java records** — this has bitten once, and only showed
+up outside the test suite:
+- `SqsTemplate.send(to -> to.queue(name).payload(record))` does not reliably
+  serialize a Java record to JSON. Against a real ElasticMQ container, the
+  record's own `toString()` landed on the queue verbatim
+  (`NotificationMessage[tenantId=acme, notificationId=...]`), and
+  `@SqsListener` then failed every delivery with a Jackson parse error
+  ("Unrecognized token 'NotificationMessage'") — which is a real, reported
+  upstream issue, not a local misconfiguration.
+- **The automated integration test did not catch it.** `NotificationIntegrationTest`
+  passed against the same real ElasticMQ container both before and after the
+  fix, which means whatever made the conversion misbehave was not
+  reproduced by that test run — a genuine gap between the test suite and a
+  live `spring-boot:run`, the same category of surprise Testcontainers
+  lifecycle and the pinned-image rules exist to catch, just from a
+  different angle. It was only found by actually running the app
+  (`docker compose up`, `spring-boot:run -Dspring-boot.run.profiles=dev`)
+  and generating a real invoice — the CLAUDE.md §8 instinct to verify a
+  feature live, not just in tests, is what surfaced it.
+- **Fix: serialize by hand on both sides**, rather than trust the
+  framework's automatic type-based conversion for a record payload.
+  `SqsNotificationPublisher` calls `objectMapper.writeValueAsString(message)`
+  and sends that `String` (which `StringMessageConverter` then passes
+  through unchanged); `SqsNotificationListener`'s `@SqsListener` method
+  takes a `String` parameter and calls `objectMapper.readValue(body, ...)`
+  itself. Symmetric on both ends, and it removes the ambiguity entirely
+  rather than searching for the right converter configuration.
+
 **Servlet filters + Spring Security** — this has bitten three times in one
 commit:
 - Spring Boot **auto-registers every `Filter` bean** into the servlet chain. A
@@ -400,6 +443,35 @@ unattended ones.
   Use the environment variable (`DUNNING_CYCLE_CRON="*/20 * * * * *"`) when
   shortening a schedule to watch a job run locally.
 
+**Notification invariants** — an outbox is only as good as the discipline
+around when things are written to it and when the queue is touched.
+- **The outbox row commits with the change that caused it, never after.**
+  `NotificationService`'s enqueue methods run inside the caller's own
+  transaction (`InvoiceService.generateForCurrentPeriod`,
+  `DunningService.onPaymentFailed`/`giveUp`) so a rollback there takes the
+  notification down with it. Nothing publishes to SQS from inside that
+  transaction — that's a remote call, the same rule as the invoice PDF and
+  the payment provider.
+- **The relay claims, publishes, then records — never publishes from inside
+  a transaction.** `NotificationRelayService.claimPending` and
+  `.markPublished` are two separate short transactions; the SQS publish
+  between them runs with none open, the same "reserve, call with nothing
+  open, record" split as `PaymentService` and `InvoicePdfService`.
+- **Delivery is idempotent by status, not by remembering message ids** —
+  the same shape `PaymentSettlementService` uses for provider events. Only
+  a row that isn't already `SENT` gets delivered, so a redelivered or
+  duplicated SQS message is a no-op rather than a duplicate email.
+- **A delivery failure must propagate, never be swallowed.**
+  `SqsNotificationListener` lets any exception from `NotificationDeliveryService`
+  escape rather than catching it: an unacknowledged message is what makes
+  SQS redeliver it, and eventually route it to `notifications-dlq` via the
+  redrive policy in `docker/elasticmq/elasticmq.conf`. Catching it there
+  would acknowledge a message that was never actually delivered.
+- **Queues are infrastructure, provisioned outside the application** — the
+  same way real SQS queues would exist before a deploy touches them.
+  `elasticmq.conf` defines `notifications` and `notifications-dlq`; the app
+  resolves them by name and never creates them.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
 
@@ -451,9 +523,12 @@ tenant (id varchar(64) PK — slug)
  │        ├── payment      (V11; unique tenant_id + idempotency_key, plus the partial unique index
  │        │                 ux_payment_invoice_in_flight_or_succeeded on (tenant_id, invoice_id)
  │        │                 WHERE status IN ('PENDING','SUCCEEDED') — one charge per invoice)
- │        └── dunning_state (V13; unique tenant_id + invoice_id — retry schedule, deleted once
- │                          the invoice settles; separate from invoice because an invoice is
- │                          immutable once issued)
+ │        ├── dunning_state (V13; unique tenant_id + invoice_id — retry schedule, deleted once
+ │        │                the invoice settles; separate from invoice because an invoice is
+ │        │                immutable once issued)
+ │        └── notification (V14; unique tenant_id + dedup_key — invoice_id nullable, since not
+ │                          every notification is about one; html_body/text_body rendered and
+ │                          stored at enqueue time; relayed to SQS, delivered over SMTP)
  └── audit_event
 
 invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
@@ -475,13 +550,13 @@ Seeded tenants for local dev: `acme`, `demo`.
 Subscription state transitions (cancel/pause/resume), renewal processing,
 usage metering, billing/invoice calculation, invoice PDFs (MinIO),
 JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
-settlement) and dunning (automatic collection, retries, `PAST_DUE` →
-`UNCOLLECTIBLE`/`CANCELED`) are done — see the subscription-hub-state skill.
+settlement), dunning (automatic collection, retries, `PAST_DUE` →
+`UNCOLLECTIBLE`/`CANCELED`) and notifications (transactional outbox → SQS →
+email, invoice-issued/payment-failed/subscription-canceled) are done — see
+the subscription-hub-state skill.
 
-Next: Notifications (MailHog — the PDF
-is the attachment, which is why it came first) →
-**Tenant provisioning (platform-admin API)** → Audit events → Observability
-(Actuator, Micrometer, Prometheus, Grafana).
+Next: **Tenant provisioning (platform-admin API)** → Audit events →
+Observability (Actuator, Micrometer, Prometheus, Grafana).
 
 Two notes on that order:
 

@@ -397,13 +397,114 @@ description: What is built in Subscription Hub, why each decision was made, and 
     genuinely holds), attempt 2 after forcing it due, then
     `UNCOLLECTIBLE`/`CANCELED` at the limit, and `PAID`/`ACTIVE` when the card was
     fixed mid-cycle.
+- **Notifications** — `notification/` module (`app`, `domain`,
+  `infra/{jpa, sqs, mail, template}`; no `api`, same as dunning — this is an
+  outbox and a queue consumer, not endpoints). Closes dunning's biggest
+  documented gap: *"Nobody is told anything."*
+  - **A transactional outbox, not a direct send.** Publishing to SQS inside
+    the business transaction and rolling back would email a customer about
+    something that never happened; publishing after commit and crashing
+    before the message goes out would lose it silently. You cannot commit a
+    database row and publish to a queue atomically (the dual-write
+    problem), so `NotificationService` renders the email and writes a
+    `notification` row (V14) in the *same* transaction as the invoice or
+    dunning state change, and a separate relay moves it onward. Rendering
+    itself runs inside that transaction without breaking the "no remote
+    call in a transaction" rule, because Thymeleaf rendering is local CPU
+    work, not a remote call.
+  - **The transport is the outbox relayed to SQS, not a direct send or a
+    DB-polling consumer** — chosen deliberately over both simpler
+    alternatives, to mirror how a production system decouples "something
+    happened" from "deliver it": `NotificationRelayJob` moves `PENDING` rows
+    to SQS (`NotificationRelayService.claimPending`/`markPublished`, split
+    across two short transactions with the publish call between them and no
+    transaction open — the same "reserve, call with nothing open, record"
+    shape as `PaymentService` and `InvoicePdfService`), and
+    `SqsNotificationListener` (`@SqsListener`, Spring Cloud AWS) consumes
+    it and calls `NotificationDeliveryService.deliver`. SQS replaces
+    hand-written retry/backoff: a failed delivery simply isn't
+    acknowledged, so SQS redelivers it after the queue's visibility
+    timeout, and the redrive policy in `docker/elasticmq/elasticmq.conf`
+    (`maxReceiveCount = 5`) moves it to `notifications-dlq` after repeated
+    failure. **ElasticMQ stands in for real SQS** locally and in tests —
+    same "code against the standard, keep the vendor a config value" shape
+    as MinIO/S3 and fake/Stripe; only `spring.cloud.aws.sqs.endpoint`
+    changes for production. SNS was deliberately left out: fan-out needs at
+    least two subscribers, and today there is exactly one (email); it
+    becomes the right addition once outbound tenant webhooks give it a
+    second.
+  - **Delivery is at-least-once, not exactly-once, end to end** — the relay
+    can publish twice, SQS can redeliver, SMTP can accept a message right
+    before a crash. `NotificationDeliveryService.deliver` treats an
+    already-`SENT` row as a no-op, which is what makes a duplicate message
+    harmless rather than a duplicate email; the one gap that can't be
+    closed this way is a crash in the split second after SMTP accepts the
+    email but before the row is marked `SENT`, which is documented rather
+    than hidden.
+  - **Every email is HTML with a plain-text alternative**, rendered
+    together by `ThymeleafEmailRenderer` (`notification/infra/template`,
+    the second Thymeleaf adapter alongside `billing/infra/pdf` — the
+    vendor-containment ArchUnit rule was split in two so both are allowed
+    without opening Thymeleaf up everywhere). One `layout.html` fragment
+    (inline styles, table layout, no `<style>` block, no external CSS or
+    images — Gmail/Outlook strip most of the rest) is shared via
+    `th:replace="~{layout.html :: layout(~{::section})}"`, the vanilla
+    "pass a fragment as an argument" pattern, no layout-dialect dependency.
+    `th:text` only, never `th:utext` — a customer name is tenant-supplied
+    input going into HTML. The subject is a plain Java string the caller
+    puts straight into the model and the renderer returns unchanged, rather
+    than parsed back out of the rendered `<title>` — simpler and no HTML
+    parsing needed.
+  - **SMTP is the last hop, and is itself a config value**: Mailpit locally
+    and in tests, Amazon SES's SMTP interface in production, a host change
+    only. `SmtpNotificationSender` (`notification/infra/mail`) is the one
+    adapter allowed to import `jakarta.mail`/`spring-mail`, same containment
+    pattern as everything else vendor-shaped in this codebase.
+  - **Three emails today**: invoice issued (with the PDF attached —
+    `NotificationDeliveryService` generates it first if `BillingCycleJob`
+    hasn't yet, self-healing the same way that job already tolerates a
+    storage outage), payment failed (dunning's non-final branch, with the
+    schedule's own `nextAttemptAt`), subscription canceled (dunning's
+    `giveUp`). `billing/domain/InvoiceIssuedListener` is a new port,
+    implemented by `NotificationService`, so `billing` still never depends
+    on `notification` — the same `PaymentOutcomeListener` shape payment
+    already uses for dunning, now used a second time.
+  - **Deduplication is a caller-checked existence test backed by
+    `uk_notification_tenant_dedup_key`** (`{type}:{invoiceId}[:{attempt}]`),
+    the same two-layer idempotency shape as invoice generation
+    (`uk_invoice_tenant_sub_period`) and payments (the in-flight partial
+    index): the check is what prevents a fired constraint from rolling back
+    the settlement transaction it joined in practice, and callers are
+    already idempotent by state, so the constraint is a backstop, not the
+    mechanism.
+  - Verified against real containers, not mocks: `NotificationIntegrationTest`
+    proves the full path (outbox row → relay → ElasticMQ → listener →
+    Mailpit, PDF attached), that a redelivered message doesn't send twice,
+    and that a notification cannot be delivered under the wrong tenant —
+    the same category of proof `TenantIsolationIntegrationTest` gives the
+    rest of the schema. No test class introduces Mockito; the codebase's
+    existing style (pure unit tests or real containers, no mocks) held for
+    this module too.
+  - **Also verified live, and only live** — see CLAUDE.md §5's "Spring Cloud
+    AWS SQS + Java records" entry. `SqsTemplate`'s default payload
+    conversion sent a record's `toString()` instead of JSON against a real
+    ElasticMQ container, and `NotificationIntegrationTest` passed both
+    before and after that bug was fixed — a real gap between the automated
+    suite and a live `spring-boot:run` that only running the app for real
+    surfaced. Both `SqsNotificationPublisher` and `SqsNotificationListener`
+    now serialize/deserialize the queue payload by hand with `ObjectMapper`
+    rather than trust the framework's automatic conversion for a record.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
   `..infra..` beyond the `*Entity` carve-out below, `common` never depends on
   a feature module, Spring Data types stay behind `..infra.jpa..`, the domain
-  stays free of `jakarta.persistence`, Thymeleaf/openhtmltopdf/the AWS SDK
-  each stay inside their one adapter package (the Stripe SDK too, confined to
+  stays free of `jakarta.persistence`, Thymeleaf (split across its two
+  adapters, `billing.infra.pdf` and `notification.infra.template`),
+  openhtmltopdf, the AWS SDK (S3 confined to `billing.infra.storage`; SQS
+  and Spring Cloud AWS confined to `notification.infra.sqs`) and
+  `jakarta.mail`/`spring-mail` (confined to `notification.infra.mail`) each
+  stay inside their one adapter package (the Stripe SDK too, confined to
   `payment.infra.gateway`), `*Controller`/`*RepositoryImpl`/
   `*Entity` sit where their name says, no cycles between feature-module
   slices, and no field-level `@Autowired`. Pure bytecode analysis — no Spring
@@ -600,14 +701,17 @@ feature module does.
 
 **Dunning**
 
-- **A customer with no stored payment method is never chased.** Their invoices
-  stay `OPEN` forever, no dunning row is created, and nothing escalates. A real
-  system would email them, or eventually write the invoice off; both need
-  notifications, which is the next roadmap line.
-- **Nobody is told anything.** No email on a failed payment, on the final
-  cancellation, or on recovery — the customer's service simply stops. That is the
-  single biggest gap in this module and is deliberate: notifications come next,
-  and the invoice PDF already exists to attach to them.
+- **A customer with no stored payment method is never chased, and now never
+  emailed either.** Their invoices stay `OPEN` forever, no dunning row is
+  created, and `DunningService.startAttempt` returns before a notification
+  could be enqueued (there is no dunning state to hang a "payment failed"
+  email off in this branch). Notifications exist now, but this specific
+  path still isn't wired to one; a real system would email the customer to
+  add a payment method, or eventually write the invoice off.
+- ~~Nobody is told anything~~ — closed by Notifications (see Current state):
+  invoice-issued, payment-failed and subscription-canceled all email the
+  customer now. There is still no recovery/"payment succeeded" email — see
+  the Notifications gaps below.
 - **One dunning policy for every tenant.** The delays and attempt count are
   application config, not per-tenant or per-plan, so a tenant selling €5/month
   cannot retry differently from one selling €5,000/month. Making it per-tenant is
@@ -623,6 +727,47 @@ feature module does.
 - **No metrics.** How many invoices are in dunning, how many recover, and at which
   attempt, are exactly the numbers a billing team would ask for first, and there
   is nowhere to read them but the database. Waiting on the observability line.
+
+**Notifications**
+
+- **No recovery email.** A payment that succeeds after `PAST_DUE` silently
+  returns the subscription to `ACTIVE` (`DunningService.onPaymentSucceeded`)
+  with nothing sent to the customer. Adding it is a fourth `EmailTemplate`
+  and an `enqueuePaymentRecovered` call in the same place, not a design
+  change.
+- **The relay is single-instance**, the same assumption `BillingCycleJob`
+  and `DunningJob` already make: `NotificationRelayJob` claims `PENDING`
+  rows with a plain `SELECT`, not `FOR UPDATE SKIP LOCKED`, so two
+  instances would race to publish the same row. The consumer side
+  (`SqsNotificationListener`) has no such limit — SQS is exactly what makes
+  *that* half horizontally scalable.
+- **SQS's redrive policy is a fixed visibility timeout, not exponential
+  backoff.** A message that fails redelivers at the same interval every
+  time until `maxReceiveCount` is reached, rather than the lengthening
+  delays `DunningSchedule` uses for payment retries. Changing the
+  visibility timeout per failed receive is the refinement, deliberately not
+  built for three email templates' worth of traffic.
+- **Nothing reads `notifications-dlq`.** A message that exhausts its
+  retries lands there and stays there — no redrive tooling, no alert, no
+  endpoint. `notification.delivery_attempts`/`last_error` on the row are
+  the only trace, and only until someone thinks to look.
+- **Deduplication can under-count a manual dunning failure.** A failed
+  *manual* payment (`DunningService.onPaymentFailed`'s fresh-state branch)
+  doesn't increment `attempt_count`, so its dedup key
+  (`payment-failed:{invoiceId}:0`) is reused if a second manual attempt
+  fails before the job ever runs — the second failure's email is silently
+  skipped. Narrow and already documented at the call site; not worth a
+  schema change for how rarely a manual retry repeats before the next job
+  tick.
+- **Text and HTML only, one language, no per-tenant branding.** The sender
+  address, subject copy and template wording are all global config, the
+  same simplification the rest of the platform makes (one dunning policy,
+  one currency-per-invoice) until a second tenant's requirements actually
+  diverge.
+- **No template preview or visual regression testing.** `ThymeleafEmailRendererTest`
+  checks the rendered strings (escaping, no HTML in the text part, correct
+  substitutions) but nothing renders the HTML in an actual mail client —
+  Mailpit's web inbox is the closest thing, and it's a manual check.
 
 **Authentication and authorization**
 

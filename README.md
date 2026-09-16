@@ -45,11 +45,18 @@ tenants (SaaS customers) from one deployment:
   `PAST_DUE` and schedules a retry on a lengthening backoff. A later success
   puts the subscription back to `ACTIVE`; running out of attempts writes the
   invoice off as `UNCOLLECTIBLE` and cancels the subscription.
+- **Notifications** email the customer through a transactional outbox: an
+  invoice or a dunning state change writes an outbox row in the same
+  transaction, a relay job moves it onto an SQS queue, and a listener sends
+  an HTML/text email (the invoice PDF attached, when there is one) over
+  SMTP. Locally and in tests the queue is ElasticMQ and the inbox is
+  Mailpit — both stand in for their real counterparts (SQS, Amazon SES) the
+  same way MinIO stands in for S3.
 
-Notifications, tenant provisioning and audit logging are on the roadmap
-but not yet built — see [`CLAUDE.md`](CLAUDE.md) for the architecture and
-conventions, and the state skill linked at the bottom for the detailed current
-state and an honest list of what's deliberately missing.
+Tenant provisioning and audit logging are on the roadmap but not yet built —
+see [`CLAUDE.md`](CLAUDE.md) for the architecture and conventions, and the
+state skill linked at the bottom for the detailed current state and an
+honest list of what's deliberately missing.
 
 ---
 
@@ -113,6 +120,7 @@ erDiagram
     INVOICE ||--o{ INVOICE_LINE : "itemised by"
     INVOICE ||--o{ PAYMENT : "settled by"
     INVOICE ||--o| DUNNING_STATE : "chased by"
+    INVOICE ||--o{ NOTIFICATION : notifies
 
     TENANT {
         varchar id PK "slug, e.g. acme"
@@ -241,10 +249,22 @@ erDiagram
         varchar entity_type
         jsonb data
     }
+    NOTIFICATION {
+        uuid id PK
+        varchar tenant_id FK "uk: tenant_id+dedup_key"
+        varchar type "INVOICE_ISSUED|PAYMENT_FAILED|SUBSCRIPTION_CANCELED"
+        varchar dedup_key
+        varchar recipient
+        text html_body "rendered once, at enqueue time"
+        text text_body
+        uuid invoice_id FK "nullable - not every notification is about one"
+        varchar status "PENDING|PUBLISHED|SENT"
+        int delivery_attempts "diagnostic only - SQS's redrive policy retries"
+    }
 ```
 
 `TENANT` is drawn connected only to the tables nothing else owns. Every other
-entity above carries a `tenant_id` of its own — 15 of the 16 tables do — and
+entity above carries a `tenant_id` of its own — 16 of the 17 tables do — and
 drawing all of those edges would bury the billing path.
 
 `audit_event` exists but nothing writes to it yet; `invoice.status` only reaches
@@ -309,6 +329,28 @@ settlement path reports the outcome, and dunning decides what it means for the
 subscription. Attempts are counted before the provider is called, so a crash
 costs one retry instead of re-charging the customer on every tick.
 
+### Notifications
+
+An invoice being issued and a dunning outcome (payment failed, subscription
+canceled) each write a row to a `notification` outbox table, in the same
+transaction as the change that caused it — publishing to a queue can't be
+part of that same atomic commit (the dual-write problem), so the durable
+half is the row, not the message. A relay job moves `PENDING` rows onto an
+SQS queue with no transaction open around the publish call, and a listener
+(`@SqsListener`, Spring Cloud AWS) picks the message up, attaches the
+invoice PDF when there is one, and sends the email over SMTP.
+
+That gives SQS's retry machinery for free: a delivery failure simply isn't
+acknowledged, so the message redelivers after the queue's visibility
+timeout, and a redrive policy moves it to a dead-letter queue after too many
+attempts, instead of hand-written backoff code. Delivery is idempotent by
+status — only a row that isn't already `SENT` gets delivered — so a
+redelivered or duplicated message never sends the same email twice.
+
+Locally and in CI, ElasticMQ (SQS-compatible) and Mailpit (SMTP + a REST
+inbox tests can assert against) stand in for real SQS and Amazon SES; only
+an endpoint changes for production.
+
 ### Error handling
 
 Errors are returned as RFC 7807 `application/problem+json`, with a `code`
@@ -331,11 +373,15 @@ and a `requestId` (for log correlation) on every error response.
   server, as a container), and webhook tests sign their payloads themselves,
   since verification is an HMAC against a shared secret. That is why the Stripe
   path has CI coverage a real-account integration could never have
+- Spring Cloud AWS SQS for the notification queue, backed by **ElasticMQ**
+  locally and in tests — the same "vendor is a config value" shape as MinIO/S3
+- `spring-boot-starter-mail` for outbound email, backed by **Mailpit** locally
+  and in tests as a stand-in for a real SMTP provider (e.g. Amazon SES)
 - Maven
 - springdoc-openapi (Swagger UI)
-- Docker Compose (Postgres + pgAdmin + MinIO)
-- Testcontainers — integration tests run against a real Postgres, a real MinIO
-  and Stripe's own `stripe-mock`, not hand-written mocks
+- Docker Compose (Postgres + pgAdmin + MinIO + Mailpit + ElasticMQ)
+- Testcontainers — integration tests run against a real Postgres, a real MinIO,
+  Mailpit, ElasticMQ and Stripe's own `stripe-mock`, not hand-written mocks
 - GitHub Actions CI (`mvn verify`; the tests provision their own containers)
 
 ---
@@ -366,10 +412,16 @@ This brings up:
 | pgAdmin        | http://localhost:8081    | Login with `PGADMIN_DEFAULT_EMAIL`/`PASSWORD` from `.env`; add a server with host `postgres` |
 | MinIO (S3 API) | `localhost:9000`         | Used by the app to store invoice PDFs    |
 | MinIO console  | http://localhost:9001    | Login with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` from `.env`; browse stored PDFs under the `invoices` bucket |
+| Mailpit (SMTP) | `localhost:1025`         | Used by the app to send notification emails — no credentials needed |
+| Mailpit inbox  | http://localhost:8025    | Every email the app sends lands here; nothing leaves the machine |
+| ElasticMQ (SQS)| `localhost:9324`         | Used by the app as the notification queue — no credentials needed |
+| ElasticMQ UI   | http://localhost:9325    | Browse queue depth for `notifications`/`notifications-dlq` |
 
 Flyway runs the schema migrations automatically on application startup, and the
 `invoices` bucket is created on the first PDF upload — no manual `psql` or
-bucket-creation step needed.
+bucket-creation step needed. The `notifications`/`notifications-dlq` queues are
+defined in `docker/elasticmq/elasticmq.conf` and exist as soon as the container
+starts.
 
 ### 2. Run the application
 
@@ -473,10 +525,12 @@ conflict/not-found, role denials, and tenant-isolation checks live in
 
 This is also what runs in CI on every push/PR to `main` (see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Integration tests
-provision their own Postgres, MinIO and stripe-mock via Testcontainers, so
-nothing needs to be running first — invoice totals, tenant isolation, PDF round
-trips, concurrent charge attempts, signed webhook settlement and the whole
-dunning lifecycle are all verified against the real thing rather than mocks.
+provision their own Postgres, MinIO, Mailpit, ElasticMQ and stripe-mock via
+Testcontainers, so nothing needs to be running first — invoice totals, tenant
+isolation, PDF round trips, concurrent charge attempts, signed webhook
+settlement, the whole dunning lifecycle, and notification delivery through a
+real queue and a real inbox are all verified against the real thing rather
+than mocks.
 
 ---
 
