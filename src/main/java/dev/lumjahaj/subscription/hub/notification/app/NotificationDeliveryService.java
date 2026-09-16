@@ -10,6 +10,7 @@ import dev.lumjahaj.subscription.hub.notification.domain.NotificationStatus;
 import dev.lumjahaj.subscription.hub.notification.domain.OutgoingEmail;
 import dev.lumjahaj.subscription.hub.notification.infra.jpa.NotificationEntity;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
+import dev.lumjahaj.subscription.hub.tenancy.domain.TenantRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -38,21 +39,40 @@ public class NotificationDeliveryService {
     private final NotificationRepository notifications;
     private final InvoicePdfService invoicePdfService;
     private final NotificationSender sender;
+    private final TenantRepository tenants;
 
     public NotificationDeliveryService(
             NotificationRepository notifications,
             InvoicePdfService invoicePdfService,
-            NotificationSender sender
+            NotificationSender sender,
+            TenantRepository tenants
     ) {
         this.notifications = notifications;
         this.invoicePdfService = invoicePdfService;
         this.sender = sender;
+        this.tenants = tenants;
     }
 
     public void deliver(UUID notificationId) {
         String tenantId = TenantContext.getTenantId();
         NotificationForDelivery notification = loadForDelivery(tenantId, notificationId);
         if (notification == null) {
+            return;
+        }
+
+        // A message can be on the queue already when its tenant is
+        // deactivated: the relay stops publishing for inactive tenants, but
+        // cannot recall what it already published. Checked after the SENT
+        // check above, never before - resetting a duplicate of an email that
+        // was already sent would send it again on reactivation.
+        if (tenants.findActiveById(tenantId).isEmpty()) {
+            returnToOutbox(tenantId, notificationId);
+            // Returning normally acknowledges the message. Throwing would
+            // make SQS redeliver it until the redrive policy dead-letters a
+            // message that did nothing wrong; the row back in PENDING is
+            // what NotificationRelayJob republishes once the tenant is
+            // active again, so nothing is lost either way.
+            log.info("Holding notification {}: tenant {} is inactive", notificationId, tenantId);
             return;
         }
 
@@ -127,6 +147,16 @@ public class NotificationDeliveryService {
             notification.setStatus(NotificationStatus.SENT);
             notification.setSentAt(Instant.now());
             notifications.save(notification);
+        });
+    }
+
+    @Transactional
+    void returnToOutbox(String tenantId, UUID id) {
+        notifications.findByTenantIdAndId(tenantId, id).ifPresent(notification -> {
+            if (notification.getStatus() != NotificationStatus.SENT) {
+                notification.setStatus(NotificationStatus.PENDING);
+                notifications.save(notification);
+            }
         });
     }
 
