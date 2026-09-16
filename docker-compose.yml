@@ -15,7 +15,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   pgadmin:
-    image: dpage/pgadmin4
+    # Pinned rather than :latest, same reasoning as minio below: an unpinned
+    # image only fails the day it's *re*-pulled, which is never on the machine
+    # that already has it cached, and always on a fresh clone or CI.
+    image: dpage/pgadmin4:9.17
     container_name: subscription-hub-pgadmin
     restart: unless-stopped
     environment:
