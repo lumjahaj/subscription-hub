@@ -333,6 +333,13 @@ under the `dev` profile, which is deliberately *not* the default. Migrations hav
 no notion of environment, so anything carrying a credential must never live in
 `db/migration` — a comment saying "dev only" documents the risk without preventing
 it. Seeds are numbered `V9000+` so they can never interleave with a schema version.
+The cost of that numbering: a dev database has a *higher* applied version than any
+schema migration, so every new schema migration looks out of order to Flyway and
+`validate` refuses it (`Detected resolved migration not applied to database: 11`)
+— the app then won't start locally while CI, which always starts from an empty
+container, stays green. `spring.flyway.out-of-order` is therefore `true` **under
+the `dev` profile only**, where a seeded database is the only thing that can be in
+that state.
 
 **Commits** — conventional commits, split by concern, not by chronology.
 Structural refactor, new feature, bug fix, and test tooling are separate commits.

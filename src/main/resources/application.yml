@@ -95,3 +95,12 @@ spring:
       on-profile: dev
   flyway:
     locations: classpath:db/migration,classpath:db/seed
+    # Seeds are numbered V9000+ so they can never interleave with a schema
+    # version - but that also means a dev database has a *higher* version
+    # recorded than any schema migration. Flyway then treats every new
+    # schema migration as out of order and, by default, refuses to apply it:
+    # "Detected resolved migration not applied to database: 11". Allowed
+    # here only, because only a seeded database can be in that state; the
+    # default profile keeps the strict ordering, where an unexpectedly
+    # out-of-order migration is a real signal.
+    out-of-order: true
