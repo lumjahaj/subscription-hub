@@ -3,6 +3,7 @@ package dev.lumjahaj.subscription.hub.dunning.app;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
+import dev.lumjahaj.subscription.hub.common.metrics.JobMetrics;
 import dev.lumjahaj.subscription.hub.common.logging.MdcKeys;
 import dev.lumjahaj.subscription.hub.payment.app.PaymentService;
 import dev.lumjahaj.subscription.hub.tenancy.domain.Tenant;
@@ -37,30 +38,36 @@ import java.util.UUID;
 public class DunningJob {
 
     private static final Logger log = LoggerFactory.getLogger(DunningJob.class);
+    private static final String JOB = "dunning";
 
     private final TenantRepository tenants;
     private final InvoiceRepository invoices;
     private final DunningService dunningService;
     private final PaymentService paymentService;
+    private final JobMetrics jobMetrics;
 
     public DunningJob(
             TenantRepository tenants,
             InvoiceRepository invoices,
             DunningService dunningService,
-            PaymentService paymentService
+            PaymentService paymentService,
+            JobMetrics jobMetrics
     ) {
         this.tenants = tenants;
         this.invoices = invoices;
         this.dunningService = dunningService;
         this.paymentService = paymentService;
+        this.jobMetrics = jobMetrics;
     }
 
     @Scheduled(cron = "${dunning.cycle.cron}")
     public void run() {
-        Instant now = Instant.now();
-        for (Tenant tenant : tenants.findAllActive()) {
-            TenantContext.runAs(tenant.id(), () -> processTenant(tenant.id(), now));
-        }
+        jobMetrics.run(JOB, () -> {
+            Instant now = Instant.now();
+            for (Tenant tenant : tenants.findAllActive()) {
+                TenantContext.runAs(tenant.id(), () -> processTenant(tenant.id(), now));
+            }
+        });
     }
 
     private void processTenant(String tenantId, Instant now) {
@@ -73,6 +80,7 @@ public class DunningJob {
                 } catch (Exception ex) {
                     // One uncollectable invoice must not end the tenant's run.
                     log.error("Dunning failed for invoice {}", invoiceId, ex);
+                    jobMetrics.itemFailed(JOB, "collect");
                 }
             }
         } finally {
@@ -97,6 +105,7 @@ public class DunningJob {
                 // schedule has already moved the invoice to its next slot.
                 log.warn("Dunning attempt {} for invoice {} could not be made: {}",
                         attempt.number(), invoiceId, ex.toString());
+                jobMetrics.itemFailed(JOB, "payment");
             }
         });
     }

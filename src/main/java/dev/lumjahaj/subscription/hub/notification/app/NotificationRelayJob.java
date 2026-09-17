@@ -1,11 +1,14 @@
 package dev.lumjahaj.subscription.hub.notification.app;
 
+import dev.lumjahaj.subscription.hub.common.metrics.JobMetrics;
 import dev.lumjahaj.subscription.hub.common.logging.MdcKeys;
 import dev.lumjahaj.subscription.hub.notification.domain.NotificationMessage;
 import dev.lumjahaj.subscription.hub.notification.domain.NotificationPublisher;
 import dev.lumjahaj.subscription.hub.tenancy.domain.Tenant;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -27,27 +30,38 @@ import java.util.UUID;
 public class NotificationRelayJob {
 
     private static final Logger log = LoggerFactory.getLogger(NotificationRelayJob.class);
+    private static final String JOB = "notification-relay";
     private static final int BATCH_SIZE = 100;
 
     private final TenantRepository tenants;
     private final NotificationRelayService relayService;
     private final NotificationPublisher publisher;
+    private final JobMetrics jobMetrics;
+    private final Counter published;
 
     public NotificationRelayJob(
             TenantRepository tenants,
             NotificationRelayService relayService,
-            NotificationPublisher publisher
+            NotificationPublisher publisher,
+            JobMetrics jobMetrics,
+            MeterRegistry registry
     ) {
         this.tenants = tenants;
         this.relayService = relayService;
         this.publisher = publisher;
+        this.jobMetrics = jobMetrics;
+        this.published = Counter.builder("notification.published")
+                .description("Outbox rows published to the queue")
+                .register(registry);
     }
 
     @Scheduled(fixedDelayString = "${notification.relay.delay}")
     public void run() {
-        for (Tenant tenant : tenants.findAllActive()) {
-            TenantContext.runAs(tenant.id(), () -> processTenant(tenant.id()));
-        }
+        jobMetrics.run(JOB, () -> {
+            for (Tenant tenant : tenants.findAllActive()) {
+                TenantContext.runAs(tenant.id(), () -> processTenant(tenant.id()));
+            }
+        });
     }
 
     private void processTenant(String tenantId) {
@@ -65,8 +79,10 @@ public class NotificationRelayJob {
         try {
             publisher.publish(new NotificationMessage(tenantId, id));
             relayService.markPublished(tenantId, id);
+            published.increment();
         } catch (Exception ex) {
             log.error("Failed to publish notification {}; it stays PENDING for the next run", id, ex);
+            jobMetrics.itemFailed(JOB, "publish");
         }
     }
 }

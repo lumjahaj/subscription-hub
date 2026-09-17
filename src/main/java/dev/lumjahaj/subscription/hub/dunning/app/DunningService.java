@@ -5,6 +5,7 @@ import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
+import dev.lumjahaj.subscription.hub.common.metrics.AfterCommit;
 import dev.lumjahaj.subscription.hub.dunning.domain.DunningStateRepository;
 import dev.lumjahaj.subscription.hub.dunning.infra.jpa.DunningStateEntity;
 import dev.lumjahaj.subscription.hub.notification.app.NotificationService;
@@ -15,6 +16,8 @@ import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionRepository;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -47,6 +50,7 @@ public class DunningService implements PaymentOutcomeListener {
     private final DunningSchedule schedule;
     private final NotificationService notificationService;
     private final AuditService audit;
+    private final MeterRegistry registry;
 
     public DunningService(
             DunningStateRepository dunningStates,
@@ -55,7 +59,8 @@ public class DunningService implements PaymentOutcomeListener {
             PaymentRepository payments,
             DunningSchedule schedule,
             NotificationService notificationService,
-            AuditService audit
+            AuditService audit,
+            MeterRegistry registry
     ) {
         this.dunningStates = dunningStates;
         this.invoices = invoices;
@@ -64,6 +69,7 @@ public class DunningService implements PaymentOutcomeListener {
         this.schedule = schedule;
         this.notificationService = notificationService;
         this.audit = audit;
+        this.registry = registry;
     }
 
     /**
@@ -81,6 +87,19 @@ public class DunningService implements PaymentOutcomeListener {
         String tenantId = TenantContext.getTenantId();
         Optional<DunningStateEntity> state = dunningStates.findByTenantIdAndInvoiceId(tenantId, invoiceId);
         state.ifPresent(dunningStates::delete);
+        // Only an invoice that was actually in dunning is a recovery; one paid
+        // on first try never had a schedule. Tagged with how many automatic
+        // attempts it took (0: a manual payment after a failure, before the
+        // job ran), which is the number that says whether the retry delays
+        // are worth their provider fees. Bounded by dunning.max-attempts.
+        state.ifPresent(s -> {
+            String attempts = String.valueOf(s.getAttemptCount());
+            AfterCommit.run(() -> Counter.builder("dunning.recoveries")
+                    .description("Invoices in dunning that were eventually paid")
+                    .tag("attempts", attempts)
+                    .register(registry)
+                    .increment());
+        });
 
         invoices.findByTenantIdAndId(tenantId, invoiceId).ifPresent(invoice -> {
             SubscriptionEntity subscription = invoice.getSubscription();
@@ -187,6 +206,10 @@ public class DunningService implements PaymentOutcomeListener {
         state.setAttemptCount(attemptNumber);
         state.setNextAttemptAt(schedule.nextAttemptAt(attemptNumber, now));
         dunningStates.save(state);
+        AfterCommit.run(() -> Counter.builder("dunning.attempts.started")
+                .description("Automatic collection attempts claimed, before the provider is called")
+                .register(registry)
+                .increment());
 
         // Deterministic, so re-running the job after a crash resumes the
         // same attempt at the provider instead of charging twice.

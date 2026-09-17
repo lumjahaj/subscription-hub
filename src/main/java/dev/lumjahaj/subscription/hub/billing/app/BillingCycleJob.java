@@ -1,6 +1,7 @@
 package dev.lumjahaj.subscription.hub.billing.app;
 
 import dev.lumjahaj.subscription.hub.common.api.ResourceAlreadyExistsException;
+import dev.lumjahaj.subscription.hub.common.metrics.JobMetrics;
 import dev.lumjahaj.subscription.hub.common.logging.MdcKeys;
 import dev.lumjahaj.subscription.hub.subscription.app.SubscriptionRenewalService;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionRepository;
@@ -43,6 +44,7 @@ import java.util.UUID;
 public class BillingCycleJob {
 
     private static final Logger log = LoggerFactory.getLogger(BillingCycleJob.class);
+    private static final String JOB = "billing-cycle";
     private static final Set<SubscriptionStatus> DUE_STATUSES =
             EnumSet.of(SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE);
 
@@ -51,27 +53,32 @@ public class BillingCycleJob {
     private final InvoiceService invoiceService;
     private final InvoicePdfService invoicePdfService;
     private final SubscriptionRenewalService renewalService;
+    private final JobMetrics jobMetrics;
 
     public BillingCycleJob(
             TenantRepository tenants,
             SubscriptionRepository subscriptions,
             InvoiceService invoiceService,
             InvoicePdfService invoicePdfService,
-            SubscriptionRenewalService renewalService
+            SubscriptionRenewalService renewalService,
+            JobMetrics jobMetrics
     ) {
         this.tenants = tenants;
         this.subscriptions = subscriptions;
         this.invoiceService = invoiceService;
         this.invoicePdfService = invoicePdfService;
         this.renewalService = renewalService;
+        this.jobMetrics = jobMetrics;
     }
 
     @Scheduled(cron = "${billing.cycle.cron}")
     public void run() {
-        Instant now = Instant.now();
-        for (Tenant tenant : tenants.findAllActive()) {
-            TenantContext.runAs(tenant.id(), () -> processTenant(tenant.id(), now));
-        }
+        jobMetrics.run(JOB, () -> {
+            Instant now = Instant.now();
+            for (Tenant tenant : tenants.findAllActive()) {
+                TenantContext.runAs(tenant.id(), () -> processTenant(tenant.id(), now));
+            }
+        });
     }
 
     private void processTenant(String tenantId, Instant now) {
@@ -115,6 +122,7 @@ public class BillingCycleJob {
             invoiceId = null;
         } catch (Exception ex) {
             log.error("Invoicing failed for subscription {}", subscriptionId, ex);
+            jobMetrics.itemFailed(JOB, "invoice");
             return;
         }
 
@@ -129,6 +137,7 @@ public class BillingCycleJob {
             invoicePdfService.generatePdf(invoiceId);
         } catch (Exception ex) {
             log.error("PDF generation failed for invoice {}", invoiceId, ex);
+            jobMetrics.itemFailed(JOB, "pdf");
         }
     }
 
@@ -137,6 +146,7 @@ public class BillingCycleJob {
             renewalService.renewIfDue(subscriptionId, now);
         } catch (Exception ex) {
             log.error("Renewal failed for subscription {}", subscriptionId, ex);
+            jobMetrics.itemFailed(JOB, "renewal");
         }
     }
 }

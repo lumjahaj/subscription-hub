@@ -38,4 +38,9 @@ public class NotificationRepositoryImpl implements NotificationRepository {
             String tenantId, NotificationStatus status, Pageable pageable) {
         return jpaRepository.findByTenantIdAndStatusOrderByCreatedAtAsc(tenantId, status, pageable);
     }
+
+    @Override
+    public double oldestAgeSecondsAcrossActiveTenants(NotificationStatus status) {
+        return jpaRepository.oldestAgeSecondsAcrossActiveTenants(status.name());
+    }
 }

@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.auth.app;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
@@ -26,9 +28,11 @@ class PasswordVerifier {
             "$2a$10$weWhaGYAMz9Fzc9M.xikWefRTaxBFywEYnMyYYZYz/LTSnaeP8gci";
 
     private final PasswordEncoder passwordEncoder;
+    private final MeterRegistry registry;
 
-    PasswordVerifier(PasswordEncoder passwordEncoder) {
+    PasswordVerifier(PasswordEncoder passwordEncoder, MeterRegistry registry) {
         this.passwordEncoder = passwordEncoder;
+        this.registry = registry;
     }
 
     /**
@@ -36,14 +40,35 @@ class PasswordVerifier {
      * matches; otherwise throws InvalidCredentialsException — one exception
      * for every reason, after one bcrypt verification in every case.
      */
-    <T> T verify(Optional<T> found, Function<T, String> passwordHash, Predicate<T> enabled, String rawPassword) {
+    <T> T verify(
+            String principal, Optional<T> found, Function<T, String> passwordHash, Predicate<T> enabled, String rawPassword) {
         // Always hash, even on the paths that already cannot succeed, so
         // response time doesn't reveal which accounts exist.
         String hashToCheck = found.map(passwordHash).orElse(DUMMY_HASH);
         boolean passwordMatches = passwordEncoder.matches(rawPassword, hashToCheck);
 
-        return found
-                .filter(account -> passwordMatches && enabled.test(account))
-                .orElseThrow(InvalidCredentialsException::new);
+        Optional<T> verified = found.filter(account -> passwordMatches && enabled.test(account));
+        if (verified.isEmpty()) {
+            countFailure(principal);
+            throw new InvalidCredentialsException();
+        }
+        return verified.get();
+    }
+
+    /**
+     * auth.login.failures (principal: tenant or platform). The metric the audit
+     * log deliberately leaves out: a failed login for an unknown tenant cannot
+     * even be an audit row, and what matters about failures is their rate, for
+     * an alert on a brute-force spike. No reason tag - one reason for every
+     * failure is the enumeration defence, and a metrics endpoint must not undo
+     * it - and no tenant or email, which would be unbounded and would name
+     * accounts under attack.
+     */
+    private void countFailure(String principal) {
+        Counter.builder("auth.login.failures")
+                .description("Rejected login attempts")
+                .tag("principal", principal)
+                .register(registry)
+                .increment();
     }
 }

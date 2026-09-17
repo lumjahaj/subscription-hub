@@ -8,7 +8,10 @@ import dev.lumjahaj.subscription.hub.audit.domain.AuditEventRepository;
 import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.audit.infra.jpa.AuditEventEntity;
 import dev.lumjahaj.subscription.hub.common.logging.MdcKeys;
+import dev.lumjahaj.subscription.hub.common.metrics.AfterCommit;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.MDC;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -46,9 +49,12 @@ public class AuditService {
     private final AuditEventRepository events;
     private final ObjectMapper objectMapper;
 
-    public AuditService(AuditEventRepository events, ObjectMapper objectMapper) {
+    private final MeterRegistry registry;
+
+    public AuditService(AuditEventRepository events, ObjectMapper objectMapper, MeterRegistry registry) {
         this.events = events;
         this.objectMapper = objectMapper;
+        this.registry = registry;
     }
 
     /** Records an event in the current tenant. Used by every tenant-side use case. */
@@ -107,6 +113,28 @@ public class AuditService {
         event.setData(data == null || data.isEmpty() ? null : toJson(data));
         event.setRequestId(MDC.get(MdcKeys.REQUEST_ID));
         events.append(event);
+        countAfterCommit(type, actor);
+    }
+
+    /**
+     * audit.events (type, actor): the business-event counter, derived from the
+     * one place every real change is already reported. An audit event exists
+     * for exactly the things a billing team wants counted - invoices issued,
+     * payments failed, subscriptions past due, recovered, written off - and it
+     * is only recorded for real changes, so no second, drift-prone set of
+     * increments has to be sprinkled next to each audit call.
+     *
+     * Counted after commit, while the row itself commits with the change (see
+     * AfterCommit for why the two differ). Both tags are enums, so the series
+     * count is bounded by the types that exist.
+     */
+    private void countAfterCommit(AuditEventType type, AuditActor actor) {
+        AfterCommit.run(() -> Counter.builder("audit.events")
+                .description("Audited business events, counted once their transaction commits")
+                .tag("type", type.name())
+                .tag("actor", actor.type().name())
+                .register(registry)
+                .increment());
     }
 
     /**

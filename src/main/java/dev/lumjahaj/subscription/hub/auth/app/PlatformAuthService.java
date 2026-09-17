@@ -36,6 +36,7 @@ public class PlatformAuthService {
     @Transactional(readOnly = true)
     public PlatformTokenResponse issueToken(PlatformTokenRequest request) {
         PlatformUserEntity user = passwordVerifier.verify(
+                "platform",
                 users.findByEmail(request.email()),
                 PlatformUserEntity::getPasswordHash,
                 PlatformUserEntity::isEnabled,

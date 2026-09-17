@@ -5,6 +5,7 @@ import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
+import dev.lumjahaj.subscription.hub.common.metrics.AfterCommit;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentEvent;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentEventHandler;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentOutcomeListener;
@@ -12,6 +13,8 @@ import dev.lumjahaj.subscription.hub.payment.domain.PaymentRepository;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentStatus;
 import dev.lumjahaj.subscription.hub.payment.infra.jpa.PaymentEntity;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -46,6 +49,7 @@ public class PaymentSettlementService implements PaymentEventHandler {
     private final InvoiceRepository invoices;
     private final List<PaymentOutcomeListener> listeners;
     private final AuditService audit;
+    private final MeterRegistry registry;
 
     /**
      * The listener list is injected rather than a single collaborator, and
@@ -56,12 +60,14 @@ public class PaymentSettlementService implements PaymentEventHandler {
             PaymentRepository payments,
             InvoiceRepository invoices,
             List<PaymentOutcomeListener> listeners,
-            AuditService audit
+            AuditService audit,
+            MeterRegistry registry
     ) {
         this.payments = payments;
         this.invoices = invoices;
         this.listeners = listeners;
         this.audit = audit;
+        this.registry = registry;
     }
 
     /**
@@ -121,11 +127,29 @@ public class PaymentSettlementService implements PaymentEventHandler {
         }
         payments.save(payment);
         recordOutcome(payment);
+        countSettlement(payment);
 
         // After the payment is saved, and inside the same transaction: a
         // listener reacting to an outcome that then rolls back would leave a
         // subscription past due for a payment that never failed.
         notifyListeners(payment, event);
+    }
+
+    /**
+     * payments.settled (outcome, provider). audit.events already counts
+     * PAYMENT_SUCCEEDED and PAYMENT_FAILED; this adds the provider, so a
+     * spike in failures can be told apart from one provider misbehaving.
+     * Provider is an adapter name (fake, stripe), never a payment method.
+     */
+    private void countSettlement(PaymentEntity payment) {
+        String outcome = payment.getStatus().name();
+        String provider = payment.getProvider();
+        AfterCommit.run(() -> Counter.builder("payments.settled")
+                .description("Payments settled by a provider event, once committed")
+                .tag("outcome", outcome)
+                .tag("provider", provider)
+                .register(registry)
+                .increment());
     }
 
     /** SYSTEM regardless of provider; see AuditService.recordSystem. */

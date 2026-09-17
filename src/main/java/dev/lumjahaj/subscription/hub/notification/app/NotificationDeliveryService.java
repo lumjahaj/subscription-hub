@@ -11,6 +11,8 @@ import dev.lumjahaj.subscription.hub.notification.domain.OutgoingEmail;
 import dev.lumjahaj.subscription.hub.notification.infra.jpa.NotificationEntity;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -40,17 +42,20 @@ public class NotificationDeliveryService {
     private final InvoicePdfService invoicePdfService;
     private final NotificationSender sender;
     private final TenantRepository tenants;
+    private final MeterRegistry registry;
 
     public NotificationDeliveryService(
             NotificationRepository notifications,
             InvoicePdfService invoicePdfService,
             NotificationSender sender,
-            TenantRepository tenants
+            TenantRepository tenants,
+            MeterRegistry registry
     ) {
         this.notifications = notifications;
         this.invoicePdfService = invoicePdfService;
         this.sender = sender;
         this.tenants = tenants;
+        this.registry = registry;
     }
 
     public void deliver(UUID notificationId) {
@@ -73,6 +78,7 @@ public class NotificationDeliveryService {
             // what NotificationRelayJob republishes once the tenant is
             // active again, so nothing is lost either way.
             log.info("Holding notification {}: tenant {} is inactive", notificationId, tenantId);
+            countDelivery("held");
             return;
         }
 
@@ -86,12 +92,29 @@ public class NotificationDeliveryService {
                     notification.html(), notification.text(), attachment));
 
             markSent(tenantId, notificationId);
+            countDelivery("sent");
         } catch (Exception ex) {
             recordFailure(tenantId, notificationId, ex);
+            countDelivery("failed");
             // Rethrown deliberately: SqsNotificationListener must see this
             // so the message is not acknowledged and SQS redelivers it.
             throw new NotificationDeliveryException("Failed to deliver notification " + notificationId, ex);
         }
+    }
+
+    /**
+     * notification.deliveries (outcome): sent, failed (SQS will redeliver, and
+     * after maxReceiveCount dead-letter it), or held for an inactive tenant.
+     * A duplicate of an already-sent message is none of these and is not
+     * counted. Each outcome is recorded by its own committed transaction
+     * before this runs, so no AfterCommit is needed here.
+     */
+    private void countDelivery(String outcome) {
+        Counter.builder("notification.deliveries")
+                .description("Notification delivery attempts by outcome")
+                .tag("outcome", outcome)
+                .register(registry)
+                .increment();
     }
 
     /**

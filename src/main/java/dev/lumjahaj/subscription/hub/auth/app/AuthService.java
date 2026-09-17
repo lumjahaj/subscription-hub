@@ -55,7 +55,7 @@ public class AuthService {
                 : Optional.empty();
 
         AppUserEntity user = passwordVerifier.verify(
-                found, AppUserEntity::getPasswordHash, AppUserEntity::isEnabled, request.password());
+                "tenant", found, AppUserEntity::getPasswordHash, AppUserEntity::isEnabled, request.password());
 
         return issueFor(user);
     }

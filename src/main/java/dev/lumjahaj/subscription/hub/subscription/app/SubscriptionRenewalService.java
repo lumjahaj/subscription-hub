@@ -1,10 +1,13 @@
 package dev.lumjahaj.subscription.hub.subscription.app;
 
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
+import dev.lumjahaj.subscription.hub.common.metrics.AfterCommit;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionRepository;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -15,9 +18,15 @@ import java.util.UUID;
 public class SubscriptionRenewalService {
 
     private final SubscriptionRepository subscriptions;
+    private final Counter renewals;
 
-    public SubscriptionRenewalService(SubscriptionRepository subscriptions) {
+    public SubscriptionRenewalService(SubscriptionRepository subscriptions, MeterRegistry registry) {
         this.subscriptions = subscriptions;
+        // Renewals are deliberately not audited (high volume, derivable), so
+        // they get their own counter rather than appearing in audit.events.
+        this.renewals = Counter.builder("subscription.renewals")
+                .description("Subscriptions rolled forward one billing period")
+                .register(registry);
     }
 
     /**
@@ -42,6 +51,7 @@ public class SubscriptionRenewalService {
         boolean changed = applyRenewal(subscription, now);
         if (changed) {
             subscriptions.save(subscription);
+            AfterCommit.run(renewals::increment);
         }
         return changed;
     }
