@@ -181,3 +181,51 @@ Authorization: Bearer {{supportToken}}
   "code": "support-denied",
   "name": "Should Be Denied"
 }
+
+### ---------------------------------------------------------------------
+### Requests Spring rejects before any controller runs. Each is the
+### caller's mistake, so each is a 4xx problem+json with a code - these
+### all used to fall through to the catch-all as 500 INTERNAL_ERROR.
+### Uses acme's ADMIN token from the top of this file.
+### ---------------------------------------------------------------------
+
+### Body is not JSON (expects 400 MALFORMED_REQUEST_BODY)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{"code": "broken",
+
+### Field of the wrong type (expects 400 MALFORMED_REQUEST_BODY naming
+### amountCents, without echoing the value or naming the DTO class)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "productCode": "whatever",
+  "code": "wrong-type",
+  "name": "Wrong Type",
+  "intervalUnit": "MONTH",
+  "amountCents": "ten",
+  "currency": "EUR"
+}
+
+### Unsupported method (expects 405 METHOD_NOT_ALLOWED with an Allow header)
+DELETE {{baseUrl}}/api/products
+Authorization: Bearer {{acmeToken}}
+
+### Unsupported content type (expects 415 UNSUPPORTED_MEDIA_TYPE)
+POST {{baseUrl}}/api/products
+Content-Type: text/plain
+Authorization: Bearer {{acmeToken}}
+
+code=plain-text
+
+### Unknown URL with a token (expects 404 ENDPOINT_NOT_FOUND)
+GET {{baseUrl}}/api/no-such-endpoint
+Authorization: Bearer {{acmeToken}}
+
+### Unknown URL without a token (expects 401 - authentication comes first,
+### so an anonymous caller cannot probe which endpoints exist)
+GET {{baseUrl}}/api/no-such-endpoint
