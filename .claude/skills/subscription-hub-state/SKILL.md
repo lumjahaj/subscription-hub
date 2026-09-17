@@ -751,6 +751,28 @@ feature module does.
   still not atomic, but the losing side of the race now gets the same 409
   a synchronous duplicate does, instead of a 500.
 - ~~`Page<T>` serialization~~ — closed. See Current state's API hardening pass.
+- **`spring.jpa.open-in-view` is on, by default** (it is set nowhere; Boot logs a
+  warning). Turning it off is roadmap step 4 in CLAUDE.md §7, and it removes less than it
+  looks like it should. **It removes** `PaymentWebhookService`'s unbind/rebind,
+  and makes `TenantContext.runAs` before a transaction enough for a platform
+  request. **It does not remove** the `AppUserEntity` and `AuditEventEntity`
+  exceptions: login and provisioning have no tenant in context when their
+  transaction opens, with or without open-in-view. Removing those needs
+  `AuthService` and `TenantProvisioningService` restructured around
+  `runAs` + `TransactionTemplate`; open-in-view only makes that impossible today.
+  **What breaks when it is off:** lazy loading in mappers called by controllers
+  outside a transaction: `PlanMapper` (`getProduct().getCode()`),
+  `PlanEntitlementMapper` and `SubscriptionMapper` (`getPlan().getCode()`,
+  including cancel/pause/resume), and `InvoiceMapper` (`getLines()`).
+  `getX().getId()` on a proxy is safe. The fix is `@EntityGraph` on the finders
+  those endpoints use.
+  **Unverified, check before relying on it:** Spring's `HibernateJpaVendorAdapter`
+  is believed to set `DELAYED_ACQUISITION_AND_HOLD`, which with open-in-view would
+  keep the JDBC connection from `PaymentService`'s reserve step checked out
+  through the provider HTTP call and through PDF streaming. That would undercut the
+  "no provider call inside a transaction" rule for the connection pool, even
+  though no transaction is open. Observability's `hikaricp.connections.active`
+  during a slowed provider call is the way to confirm it.
 
 **Testing**
 
@@ -866,6 +888,16 @@ feature module does.
 
 **Dunning**
 
+- **A concurrent pause can be overwritten with `PAST_DUE`.** `DunningService`
+  reads the subscription's status, checks it is not `PAUSED` or `CANCELED`, then
+  sets `PAST_DUE`, with no lock and no `@Version`. A pause that commits between
+  that read and the write is silently lost, which breaks the "PAUSED is never
+  dragged to PAST_DUE" invariant under concurrency. Rare, since it needs a
+  customer's pause to land during a failed payment's settlement. The fix is
+  `@Version` on `subscription` (CLAUDE.md §7 roadmap step 4). The catch is that its writers are
+  dunning and settlement, not a request, and a lock failure would roll back
+  settlement. With the fake gateway that runs inside the paying request, so
+  those callers need a retry-or-skip policy first.
 - **A customer with no stored payment method is never chased, and now never
   emailed either.** Their invoices stay `OPEN` forever, no dunning row is
   created, and `DunningService.startAttempt` returns before a notification
@@ -996,7 +1028,9 @@ feature module does.
 - **Two concurrent deactivations can both record.** `setActive` reads the flag,
   then updates it, without a lock, so two simultaneous calls may each see
   "active" and each write `TENANT_DEACTIVATED`. It is harmless and rare, and it
-  is not worth a lock.
+  is not worth a pessimistic lock. `@Version` on `tenant` (CLAUDE.md §7 roadmap step 2)
+  closes it for free: the losing transaction fails its version check at flush,
+  and `AuditService.record`'s MANDATORY propagation takes the event down with it.
 - **Ordering is by `created_at` only.** Two events in one transaction can share a
   timestamp at the clock's resolution, and then their relative order in a
   response is unspecified. No read depends on it today.
@@ -1009,6 +1043,19 @@ feature module does.
   parameter and the expected shape (an enum's allowed values, "must be a UUID")
   but never echoes the rejected value, and the sort error never names the entity
   class.
+- **The rest of that category is still a 500.** `ProblemDetailsAdvice` does not
+  extend `ResponseEntityExceptionHandler`, and its `@ExceptionHandler(Exception.class)`
+  catch-all runs before Spring's `DefaultHandlerExceptionResolver`, so Spring MVC's
+  own client-error exceptions become 500 `INTERNAL_ERROR`:
+  - `HttpMessageNotReadableException` (malformed JSON body)
+  - `HttpRequestMethodNotSupportedException` (405)
+  - `HttpMediaTypeNotSupportedException` (415)
+  - `NoResourceFoundException` (unknown URL with a valid token)
+  - `MissingServletRequestParameterException` (latent: no query parameter is
+    required today)
+
+  Found by reading the code, not yet confirmed with a request. Roadmap step 1 in
+  CLAUDE.md §7.
 
 **Tenant provisioning**
 

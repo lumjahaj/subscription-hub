@@ -637,7 +637,23 @@ provisioning (platform-admin principal and API) and audit events (who changed
 what, in the change's transaction) are done — see the subscription-hub-state
 skill.
 
-Next: **Observability** (Actuator, Micrometer, Prometheus, Grafana).
+Next, in this order (re-sequenced 2026-09-17; reasoning for each gap is in the
+subscription-hub-state skill's Known gaps):
+
+1. **Error-mapping sweep.** Malformed JSON, 405, 415, unknown URLs and missing
+   required parameters still fall through to the catch-all as 500. Before
+   Observability, or client mistakes pollute the server-error metrics.
+2. **Optimistic locking, step A.** `@Version` on `customer` and `tenant`
+   (`bigint NOT NULL DEFAULT 0`: a null version makes Spring Data treat an
+   existing row as new), a 409 handler for the lock failure, and
+   `PUT /api/customers/{id}` with `ETag`/`If-Match`. Customer rather than Plan:
+   invoices read the plan's price at generation time, so a price edit would
+   reprice every subscriber's unbilled period.
+3. **Observability** (Actuator, Micrometer, Prometheus, Grafana). Decides who may
+   read metrics.
+4. **`spring.jpa.open-in-view` off, plus `@Version` on `subscription`.** Measured
+   with the connection-pool metrics from step 3. The subscription step needs a
+   retry-or-skip policy in dunning/settlement first, because those are its writers.
 
 - **Audit events moved after authentication**, and had to. The point of an
   audit log is recording *who* did something, and building it before there was
