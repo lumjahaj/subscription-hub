@@ -142,8 +142,12 @@ management:
 
 logging:
   pattern:
-    level: "%5p [tenant:%X{tenantId:-?} req:%X{requestId:-?}]"
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg tenant=%X{tenant} requestId=%X{requestId}%n"
+    # The MDC keys are MdcKeys.TENANT_ID ("tenantId") and REQUEST_ID. This
+    # used to read %X{tenant}, a key nothing sets, so every line logged an
+    # empty tenant. A separate `level` pattern also existed and was never
+    # used: it only applies through %5p in Boot's default pattern, which this
+    # one replaces.
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg tenant=%X{tenantId} requestId=%X{requestId}%n"
   level:
     root: INFO
     org.springframework: INFO
