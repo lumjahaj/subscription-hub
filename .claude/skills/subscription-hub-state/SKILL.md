@@ -1000,11 +1000,15 @@ feature module does.
 - **Ordering is by `created_at` only.** Two events in one transaction can share a
   timestamp at the clock's resolution, and then their relative order in a
   response is unspecified. No read depends on it today.
-- **A bad `entityType` value is a 500, not a 400** (verified live:
-  `?entityType=NOPE` returns `INTERNAL_ERROR`). `ProblemDetailsAdvice` has no
-  handler for Spring's `MethodArgumentTypeMismatchException`, so the failed
-  conversion reaches the catch-all. Other typed query parameters very likely do
-  the same, and one handler would fix all of them.
+- ~~A bad `entityType` value is a 500~~ — closed, and it was never audit-specific.
+  Every unconvertible query parameter or path variable (`?customerId=not-a-uuid`,
+  `/api/subscriptions/not-a-uuid`) and every unknown `?sort=` property was a 500.
+  `ProblemDetailsAdvice` now maps `MethodArgumentTypeMismatchException` and
+  `PropertyReferenceException` to 400 `VALIDATION_ERROR`, and
+  `InvalidRequestParameterIntegrationTest` covers them. The response names the
+  parameter and the expected shape (an enum's allowed values, "must be a UUID")
+  but never echoes the rejected value, and the sort error never names the entity
+  class.
 
 **Tenant provisioning**
 
