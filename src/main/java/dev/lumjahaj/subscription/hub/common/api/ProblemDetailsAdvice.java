@@ -168,21 +168,28 @@ public class ProblemDetailsAdvice {
     }
 
     // A body in a format no endpoint reads (text/plain, form data). The
-    // exception's headers carry Accept, listing what would have worked.
+    // exception's headers carry Accept, listing what would have worked -
+    // which is more than application/json (application/*+json, and YAML via
+    // the Jackson YAML converter on the classpath), so the message says JSON
+    // in general rather than naming one media type the header contradicts.
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     ResponseEntity<ProblemDetail> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
         return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
                 .headers(ex.getHeaders())
                 .body(base(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE",
-                        "Request body must be application/json"));
+                        "Request body must be JSON; the Accept header lists the supported types"));
     }
 
     // No handler for the URL at all. Only an authenticated caller gets this
     // far - Security answers 401 first - so it does not let an anonymous one
     // map which endpoints exist. Distinct from the resource-level
     // <TYPE>_NOT_FOUND codes: those mean "no such record", this means "no
-    // such endpoint", and a client should react differently to each. The
-    // path is not echoed, same as any other input.
+    // such endpoint", and a client should react differently to each.
+    //
+    // The detail does not repeat the path, but the response still contains
+    // it: Spring sets ProblemDetail's "instance" to the request path on every
+    // problem response. That is the caller's own URL inside a JSON string,
+    // not reflected input in a markup context, so it is left alone.
     @ExceptionHandler(NoResourceFoundException.class)
     ProblemDetail handleNoEndpoint(NoResourceFoundException ex) {
         return base(HttpStatus.NOT_FOUND, "ENDPOINT_NOT_FOUND", "No endpoint exists at this path");

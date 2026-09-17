@@ -65,6 +65,10 @@ class MalformedRequestIntegrationTest extends AbstractIntegrationTest {
                 new HttpEntity<>("code=x", headers), String.class);
 
         assertProblem(response, HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE");
+        // The detail must not name a single media type the Accept header then
+        // contradicts; the header is the authoritative list.
+        assertThat(response.getHeaders().getAccept()).contains(MediaType.APPLICATION_JSON);
+        assertThat(response.getBody()).doesNotContain("must be application/json");
     }
 
     @Test
