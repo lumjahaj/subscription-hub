@@ -12,6 +12,7 @@ import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class PlanService {
@@ -24,6 +25,7 @@ public class PlanService {
         this.products = products;
     }
 
+    @Transactional
     public PlanEntity create(PlanCreateRequest request) {
         String tenantId = TenantContext.getTenantId();
 

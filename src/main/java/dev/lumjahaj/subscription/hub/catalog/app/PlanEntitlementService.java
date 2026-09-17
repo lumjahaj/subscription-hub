@@ -10,6 +10,7 @@ import dev.lumjahaj.subscription.hub.common.api.ResourceAlreadyExistsException;
 import dev.lumjahaj.subscription.hub.common.api.ResourceNotFoundException;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -30,6 +31,7 @@ public class PlanEntitlementService {
         this.mapper = mapper;
     }
 
+    @Transactional
     public PlanEntitlementEntity create(String planCode, PlanEntitlementCreateRequest request) {
         String tenantId = TenantContext.getTenantId();
 

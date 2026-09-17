@@ -13,6 +13,7 @@ import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -34,6 +35,7 @@ public class SubscriptionService {
         this.plans = plans;
     }
 
+    @Transactional
     public SubscriptionEntity create(SubscriptionCreateRequest request) {
         String tenantId = TenantContext.getTenantId();
 
@@ -67,6 +69,7 @@ public class SubscriptionService {
         return subscriptions.save(entity);
     }
 
+    @Transactional
     public SubscriptionEntity cancel(UUID id) {
         SubscriptionEntity subscription = findOwned(id);
         if (subscription.getStatus() == SubscriptionStatus.CANCELED) {
@@ -77,6 +80,7 @@ public class SubscriptionService {
         return subscriptions.save(subscription);
     }
 
+    @Transactional
     public SubscriptionEntity pause(UUID id) {
         SubscriptionEntity subscription = findOwned(id);
         if (subscription.getStatus() != SubscriptionStatus.ACTIVE
@@ -87,6 +91,7 @@ public class SubscriptionService {
         return subscriptions.save(subscription);
     }
 
+    @Transactional
     public SubscriptionEntity resume(UUID id) {
         SubscriptionEntity subscription = findOwned(id);
         if (subscription.getStatus() != SubscriptionStatus.PAUSED) {

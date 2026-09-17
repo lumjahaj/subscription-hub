@@ -10,6 +10,7 @@ import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.UUID;
 
@@ -22,6 +23,7 @@ public class CustomerService {
         this.customers = customers;
     }
 
+    @Transactional
     public CustomerEntity create(CustomerCreateRequest request) {
         String tenantId = TenantContext.getTenantId();
 
@@ -55,6 +57,7 @@ public class CustomerService {
      * provider token, and keeping payment credentials around after they
      * stop being needed is how they end up somewhere they shouldn't be.
      */
+    @Transactional
     public CustomerEntity setDefaultPaymentMethod(UUID id, String paymentMethod) {
         CustomerEntity customer = getById(id);
         customer.setDefaultPaymentMethod(paymentMethod);
@@ -66,6 +69,7 @@ public class CustomerService {
      * way rather than 404ing on the second call — because the resource
      * being cleared is a field, not a row.
      */
+    @Transactional
     public CustomerEntity clearDefaultPaymentMethod(UUID id) {
         CustomerEntity customer = getById(id);
         customer.setDefaultPaymentMethod(null);
