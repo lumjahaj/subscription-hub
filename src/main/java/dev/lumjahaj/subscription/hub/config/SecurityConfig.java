@@ -57,7 +57,10 @@ public class SecurityConfig {
                         // Obtaining a token cannot itself require one.
                         .requestMatchers(HttpMethod.POST, "/api/auth/token", "/api/platform/auth/token").permitAll()
                         // Liveness probes run before anything can authenticate.
-                        .requestMatchers("/api/health", "/actuator/health").permitAll()
+                        // /actuator/health/** covers the liveness and
+                        // readiness probe groups, which an orchestrator also
+                        // calls without credentials.
+                        .requestMatchers("/api/health", "/actuator/health", "/actuator/health/**").permitAll()
                         // Payment providers hold no token of ours. These
                         // requests authenticate by signature instead, which
                         // StripeWebhook verifies before anything is acted
@@ -70,13 +73,15 @@ public class SecurityConfig {
                         // the platform.
                         .requestMatchers("/api/platform/**").hasRole(PlatformRole.PLATFORM_ADMIN)
                         // Everything else under /actuator is platform
-                        // infrastructure: authenticated at minimum, never
-                        // blanket-public. Only health and info are exposed at
-                        // all (see application.yml), so this is defence in
-                        // depth against a future exposure change. Deliberately
-                        // either kind of token for now; Observability decides
-                        // who may read metrics.
-                        .requestMatchers("/actuator/**").authenticated()
+                        // infrastructure, so it is the platform principal's:
+                        // a tenant administrator has no business reading
+                        // application internals. /actuator/prometheus never
+                        // reaches this chain - MetricsSecurityConfig's chain
+                        // is ordered first and owns it, with its own scrape
+                        // account. Only health, info and prometheus are
+                        // exposed at all (application.yml), so this is also
+                        // defence in depth against a future exposure change.
+                        .requestMatchers("/actuator/**").hasRole(PlatformRole.PLATFORM_ADMIN)
                         // Every tenant endpoint needs a token that names a
                         // tenant. A platform token is authenticated but has
                         // no tenant_id, so without this it would reach

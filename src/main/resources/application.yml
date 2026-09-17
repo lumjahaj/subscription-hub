@@ -132,13 +132,41 @@ management:
         # been doing nothing. Deleted rather than repaired - that endpoint
         # records request and response headers, which now means bearer
         # tokens would sit in a queryable endpoint.
-        include: health,info
+        # prometheus is readable only by the scrape account
+        # (MetricsSecurityConfig), never by a tenant or platform token.
+        include: health,info,prometheus
   endpoint:
     health:
       # Explicit even though `never` is the default, so a later change to
       # `always` can't quietly start publishing database and disk internals
       # to an unauthenticated probe.
       show-details: when-authorized
+      # /actuator/health/liveness and /readiness. Boot turns these on by
+      # itself only on Kubernetes. Readiness matters here: Boot accepts HTTP
+      # before ApplicationRunners (PlatformAdminBootstrap) finish, and
+      # readiness only reports UP after them, so anything that routes traffic
+      # on it never sends a request too early.
+      probes:
+        enabled: true
+  metrics:
+    distribution:
+      # Publishes latency as histogram buckets, so p95/p99 can be computed in
+      # Prometheus across the whole service. Client-side percentiles cannot be
+      # aggregated across instances or over time.
+      percentiles-histogram:
+        http.server.requests: true
+    tags:
+      # On every meter, so one Prometheus can tell this service's series
+      # apart from anything else it scrapes.
+      application: ${spring.application.name}
+
+# The one account allowed to read /actuator/prometheus. Both empty by default:
+# metrics are then unreadable (401) rather than open, and a clean clone needs
+# no secret. See MetricsScrapeCredential for the rules.
+metrics:
+  scrape:
+    username: ${METRICS_SCRAPE_USERNAME:}
+    password: ${METRICS_SCRAPE_PASSWORD:}
 
 logging:
   pattern:

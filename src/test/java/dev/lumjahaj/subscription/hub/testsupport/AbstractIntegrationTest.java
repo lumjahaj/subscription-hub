@@ -6,6 +6,7 @@ import dev.lumjahaj.subscription.hub.auth.api.dto.PlatformTokenResponse;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenRequest;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenResponse;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -89,8 +90,17 @@ import static org.assertj.core.api.Assertions.assertThat;
         // fake. Here on the shared base, never a subclass: a differing
         // property set is a different context-cache key.
         "stripe.webhook-secret=whsec_test_only_webhook_signing_secret",
-        "notification.relay.delay=86400000"
+        "notification.relay.delay=86400000",
+        // The scrape account MetricsEndpointIntegrationTest reads
+        // /actuator/prometheus with. Unset, every scrape is 401 by design.
+        "metrics.scrape.username=test-scraper",
+        "metrics.scrape.password=test-only-scrape-password"
 })
+// @SpringBootTest replaces every metrics exporter with a SimpleMeterRegistry
+// unless told otherwise, so without this /actuator/prometheus would not exist
+// in tests at all. On the base for the usual reason: an annotation on one
+// subclass would be a second context.
+@AutoConfigureObservability
 public abstract class AbstractIntegrationTest {
 
     /** Matches the bcrypt hash in db/seed/V9001__seed_dev_users.sql. */
