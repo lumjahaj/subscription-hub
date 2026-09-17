@@ -127,13 +127,17 @@ public class TenantProvisioningService {
      * Records an event only when the flag actually changes. Deactivating an
      * inactive tenant is an idempotent no-op, and a no-op is not something
      * that happened.
+     *
+     * "Changed" comes from the update itself, not from comparing against an
+     * earlier read: two concurrent deactivations used to both read "active"
+     * and both record TENANT_DEACTIVATED. Now only the call whose UPDATE hit
+     * the row records; the other is the ordinary no-op.
      */
     private Tenant setActive(String id, boolean active) {
-        Tenant current = get(id);
-        Tenant updated = tenants.setActive(id, active).orElseThrow(() -> new ResourceNotFoundException("Tenant", id));
-        if (current.active() != active) {
+        get(id);
+        if (tenants.setActive(id, active)) {
             audit.record(id, active ? AuditEventType.TENANT_ACTIVATED : AuditEventType.TENANT_DEACTIVATED, id, Map.of());
         }
-        return updated;
+        return get(id);
     }
 }

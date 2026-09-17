@@ -26,6 +26,15 @@ public interface TenantRepository {
      */
     Tenant create(Tenant tenant);
 
-    /** Returns the updated tenant, or empty if no tenant has that id. */
-    Optional<Tenant> setActive(String id, boolean active);
+    /**
+     * Sets the flag atomically and returns whether this call changed it: false
+     * when it already had that value, or when no tenant has that id.
+     *
+     * A single conditional UPDATE rather than read-then-write. Of two concurrent
+     * calls, exactly one sees a changed row (Postgres re-checks the WHERE clause
+     * once the first commits), so callers can act on "it changed" without a
+     * lock. Not @Version: activation is an idempotent command, and a caller whose
+     * intent is already satisfied should get the no-op, not a conflict.
+     */
+    boolean setActive(String id, boolean active);
 }

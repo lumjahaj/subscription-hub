@@ -7,6 +7,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -66,11 +67,8 @@ public class TenantRepositoryImpl implements TenantRepository {
     }
 
     @Override
-    public Optional<Tenant> setActive(String id, boolean active) {
-        return jpa.findById(id).map(entity -> {
-            entity.setActive(active);
-            return toDomain(entity);
-        });
+    public boolean setActive(String id, boolean active) {
+        return jpa.updateActiveIfDifferent(id, active, Instant.now()) == 1;
     }
 
     private static Tenant toDomain(TenantEntity entity) {

@@ -218,6 +218,37 @@ class PlatformTenantProvisioningIntegrationTest extends AbstractIntegrationTest 
     }
 
     @Test
+    void concurrentDeactivations_allSucceed_butRecordExactlyOneEvent() throws Exception {
+        // Each call used to read "active", then write, so several could see
+        // "active" and each record TENANT_DEACTIVATED. Deactivation is
+        // idempotent, so every caller must still get 200 - the fix must not
+        // turn a satisfied intent into a conflict.
+        String id = newTenantId();
+        provision(id);
+        HttpHeaders headers = platformHeaders();
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Callable<HttpStatus>> calls = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                calls.add(() -> HttpStatus.valueOf(restTemplate.exchange(
+                        "/api/platform/tenants/" + id + "/deactivate", HttpMethod.POST,
+                        new HttpEntity<>(headers), String.class).getStatusCode().value()));
+            }
+            List<HttpStatus> statuses = new ArrayList<>();
+            for (Future<HttpStatus> result : pool.invokeAll(calls)) {
+                statuses.add(result.get());
+            }
+
+            assertThat(statuses).containsOnly(HttpStatus.OK);
+            assertThat(platformAuditHistory(id)).extracting(event -> event.get("type").asText())
+                    .containsExactly("TENANT_DEACTIVATED", "TENANT_PROVISIONED");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void auditEventsOfAnUnknownTenant_isNotFound() {
         ResponseEntity<String> response = restTemplate.exchange(
                 "/api/platform/tenants/" + newTenantId() + "/audit-events", HttpMethod.GET,
