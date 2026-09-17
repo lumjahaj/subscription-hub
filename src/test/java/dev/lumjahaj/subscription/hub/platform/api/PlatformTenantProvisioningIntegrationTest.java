@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.platform.api;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenRequest;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenResponse;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductCreateRequest;
@@ -200,6 +201,29 @@ class PlatformTenantProvisioningIntegrationTest extends AbstractIntegrationTest 
         ResponseEntity<String> afterActivation = restTemplate.exchange(
                 "/api/products", HttpMethod.GET, new HttpEntity<>(tenantAdmin), String.class);
         assertThat(afterActivation.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        // Two deactivate calls but one change, so one event.
+        JsonNode history = platformAuditHistory(id);
+        assertThat(history).extracting(event -> event.get("type").asText())
+                .containsExactly("TENANT_ACTIVATED", "TENANT_DEACTIVATED", "TENANT_PROVISIONED");
+        assertThat(history).allSatisfy(event -> {
+            assertThat(event.get("actorType").asText()).isEqualTo("PLATFORM_ADMIN");
+            assertThat(event.get("entityId").asText()).isEqualTo(id);
+        });
+        // The tenant sees its own history, including what the platform did to it.
+        assertThat(restTemplate.exchange(
+                "/api/audit-events", HttpMethod.GET, new HttpEntity<>(tenantAdmin), JsonNode.class)
+                .getBody().get("content")).extracting(event -> event.get("type").asText())
+                .contains("TENANT_PROVISIONED", "TENANT_DEACTIVATED", "TENANT_ACTIVATED");
+    }
+
+    @Test
+    void auditEventsOfAnUnknownTenant_isNotFound() {
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/platform/tenants/" + newTenantId() + "/audit-events", HttpMethod.GET,
+                new HttpEntity<>(platformHeaders()), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test
@@ -217,6 +241,14 @@ class PlatformTenantProvisioningIntegrationTest extends AbstractIntegrationTest 
                 new HttpEntity<>(request(id), platformHeaders()), TenantProvisionedResponse.class);
         assertThat(response.getStatusCode()).as("provisioning tenant '%s'", id).isEqualTo(HttpStatus.CREATED);
         return response;
+    }
+
+    private JsonNode platformAuditHistory(String tenantId) {
+        ResponseEntity<JsonNode> response = restTemplate.exchange(
+                "/api/platform/tenants/" + tenantId + "/audit-events", HttpMethod.GET,
+                new HttpEntity<>(platformHeaders()), JsonNode.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        return response.getBody().get("content");
     }
 
     private TokenResponse loginAsAdmin(String tenantId, String email, String password) {

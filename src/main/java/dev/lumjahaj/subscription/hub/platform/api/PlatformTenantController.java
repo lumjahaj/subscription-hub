@@ -1,5 +1,10 @@
 package dev.lumjahaj.subscription.hub.platform.api;
 
+import dev.lumjahaj.subscription.hub.audit.api.IncompleteAuditFilterException;
+import dev.lumjahaj.subscription.hub.audit.api.dto.AuditEventResponse;
+import dev.lumjahaj.subscription.hub.audit.api.mapper.AuditEventMapper;
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEntityType;
 import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.common.api.PagedResponse;
 import dev.lumjahaj.subscription.hub.platform.api.dto.TenantCreateRequest;
@@ -38,9 +43,17 @@ import java.net.URI;
 public class PlatformTenantController {
 
     private final TenantProvisioningService provisioningService;
+    private final AuditService auditService;
+    private final AuditEventMapper auditEventMapper;
 
-    public PlatformTenantController(TenantProvisioningService provisioningService) {
+    public PlatformTenantController(
+            TenantProvisioningService provisioningService,
+            AuditService auditService,
+            AuditEventMapper auditEventMapper
+    ) {
         this.provisioningService = provisioningService;
+        this.auditService = auditService;
+        this.auditEventMapper = auditEventMapper;
     }
 
     @PostMapping
@@ -75,5 +88,30 @@ public class PlatformTenantController {
     @PreAuthorize(Authorize.PLATFORM_ADMIN)
     public ResponseEntity<TenantResponse> activate(@PathVariable String id) {
         return ResponseEntity.ok(TenantMapper.toResponse(provisioningService.activate(id)));
+    }
+
+    /**
+     * A tenant's whole audit log, as seen from the platform. This needs none
+     * of PaymentWebhookService's session handling, although the request has
+     * no tenant, because audit_event deliberately has no @TenantId (see
+     * AuditEventEntity).
+     *
+     * An unknown tenant is a 404 rather than an empty page, so a typo in the
+     * id cannot look like a tenant that did nothing.
+     */
+    @GetMapping("/{id}/audit-events")
+    @PreAuthorize(Authorize.PLATFORM_ADMIN)
+    public ResponseEntity<PagedResponse<AuditEventResponse>> auditEvents(
+            @PathVariable String id,
+            @RequestParam(required = false) AuditEntityType entityType,
+            @RequestParam(required = false) String entityId,
+            Pageable pageable
+    ) {
+        if ((entityType == null) != (entityId == null)) {
+            throw new IncompleteAuditFilterException();
+        }
+        provisioningService.get(id);
+        var page = auditService.list(id, entityType, entityId, pageable);
+        return ResponseEntity.ok(PagedResponse.from(page, auditEventMapper::toResponse));
     }
 }

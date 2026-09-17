@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.platform.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.auth.domain.AppUserRepository;
 import dev.lumjahaj.subscription.hub.auth.domain.Role;
 import dev.lumjahaj.subscription.hub.auth.infra.jpa.AppUserEntity;
@@ -14,6 +16,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -42,15 +45,18 @@ public class TenantProvisioningService {
     private final TenantRepository tenants;
     private final AppUserRepository users;
     private final PasswordEncoder passwordEncoder;
+    private final AuditService audit;
 
     public TenantProvisioningService(
             TenantRepository tenants,
             AppUserRepository users,
-            PasswordEncoder passwordEncoder
+            PasswordEncoder passwordEncoder,
+            AuditService audit
     ) {
         this.tenants = tenants;
         this.users = users;
         this.passwordEncoder = passwordEncoder;
+        this.audit = audit;
     }
 
     /**
@@ -75,7 +81,14 @@ public class TenantProvisioningService {
         admin.setEmail(request.adminEmail());
         admin.setPasswordHash(passwordEncoder.encode(initialPassword));
         admin.setRoles(Set.of(Role.ADMIN));
-        users.save(admin);
+        AppUserEntity savedAdmin = users.save(admin);
+
+        // Recorded under the new tenant, since that is whose history it is,
+        // even though no tenant is in context. The admin's id rather than the
+        // email, and never the initial password.
+        audit.record(tenant.id(), AuditEventType.TENANT_PROVISIONED, tenant.id(), Map.of(
+                "name", tenant.name(),
+                "adminUserId", savedAdmin.getId()));
 
         return new ProvisionedTenant(tenant, request.adminEmail(), initialPassword);
     }
@@ -110,7 +123,17 @@ public class TenantProvisioningService {
         return setActive(id, true);
     }
 
+    /**
+     * Records an event only when the flag actually changes. Deactivating an
+     * inactive tenant is an idempotent no-op, and a no-op is not something
+     * that happened.
+     */
     private Tenant setActive(String id, boolean active) {
-        return tenants.setActive(id, active).orElseThrow(() -> new ResourceNotFoundException("Tenant", id));
+        Tenant current = get(id);
+        Tenant updated = tenants.setActive(id, active).orElseThrow(() -> new ResourceNotFoundException("Tenant", id));
+        if (current.active() != active) {
+            audit.record(id, active ? AuditEventType.TENANT_ACTIVATED : AuditEventType.TENANT_DEACTIVATED, id, Map.of());
+        }
+        return updated;
     }
 }
