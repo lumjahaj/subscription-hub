@@ -55,8 +55,14 @@ tenants (SaaS customers) from one deployment:
   SMTP. Locally and in tests the queue is ElasticMQ and the inbox is
   Mailpit — both stand in for their real counterparts (SQS, Amazon SES) the
   same way MinIO stands in for S3.
+- **Audit log** records who changed what: catalog and customer changes,
+  subscription transitions, invoices, payment outcomes, dunning decisions and
+  platform tenant lifecycle. Each event is written in the same transaction as
+  the change, attributed to a tenant user, a platform administrator, or the
+  system. A tenant's admins read it at `GET /api/audit-events`, and platform
+  administrators read it per tenant.
 
-Audit logging and observability are on the roadmap but not yet built —
+Observability is on the roadmap but not yet built —
 see [`CLAUDE.md`](CLAUDE.md) for the architecture and conventions, and the
 state skill linked at the bottom for the detailed current state and an
 honest list of what's deliberately missing.
@@ -253,10 +259,13 @@ erDiagram
     AUDIT_EVENT {
         uuid id PK
         varchar tenant_id FK
-        text actor
+        varchar actor_type "USER|PLATFORM_ADMIN|SYSTEM"
+        varchar actor_id "token subject; null only for SYSTEM"
         varchar type
         varchar entity_type
-        jsonb data
+        varchar entity_id
+        jsonb data "context only - never secrets or personal data"
+        varchar request_id
     }
     NOTIFICATION {
         uuid id PK
@@ -276,8 +285,7 @@ erDiagram
 entity above carries a `tenant_id` of its own — 16 of the 17 tables do — and
 drawing all of those edges would bury the billing path.
 
-`audit_event` exists but nothing writes to it yet; `invoice.status` only reaches
-`OPEN`, `PAID` and `UNCOLLECTIBLE` today.
+`invoice.status` only reaches `OPEN`, `PAID` and `UNCOLLECTIBLE` today.
 
 To explore the schema interactively instead, pgAdmin is already running on
 [localhost:8081](http://localhost:8081): connect to the `postgres` service, then
@@ -368,6 +376,27 @@ redelivered or duplicated message never sends the same email twice.
 Locally and in CI, ElasticMQ (SQS-compatible) and Mailpit (SMTP + a REST
 inbox tests can assert against) stand in for real SQS and Amazon SES; only
 an endpoint changes for production.
+
+### Audit log
+
+Every use case that changes something calls `AuditService` explicitly. The
+call is `@Transactional(propagation = MANDATORY)`, so the audit row commits
+with the change or not at all, and calling it without a transaction fails
+straight away. That rules out both failure modes: an event that is lost after
+its change committed, and an event for a change that rolled back. An aspect or
+a Hibernate listener would see a row update, not the intent: "canceled by an
+admin" and "canceled by dunning" are the same `UPDATE`.
+
+The actor comes from the security context, never from the caller: a
+`tenant_id` claim means `USER`, the `PLATFORM_ADMIN` role means
+`PLATFORM_ADMIN`, and no token means `SYSTEM` (jobs and webhooks). Payment
+settlement and dunning always record `SYSTEM`. With the fake provider they run
+inside the request of the user who paid, and with Stripe they run in a
+webhook, and the audit trail must not depend on which provider is configured.
+
+`audit_event` has no `@TenantId` predicate. Platform administrators record
+events under the tenant they act on, from a request that has no tenant. Every
+read takes the tenant explicitly instead.
 
 ### Error handling
 

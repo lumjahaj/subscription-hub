@@ -594,6 +594,65 @@ description: What is built in Subscription Hub, why each decision was made, and 
     until the redrive policy dead-letters something that did nothing wrong. The
     check runs **after** the already-`SENT` check, never before, or a redelivered
     duplicate of a sent email would be re-queued and sent twice.
+- **Audit events** — `audit/` module (`api`, `app`, `domain`, `infra/jpa`) and
+  V16, which activates `audit_event` (unused since V1). It waited on
+  authentication, because an audit log exists to record *who*.
+  - **Written in the change's transaction, by an explicit call.**
+    `AuditService.record` is `@Transactional(propagation = MANDATORY)`. After
+    commit (`@TransactionalEventListener`) a crash loses the event; in its own
+    transaction a rolled-back change leaves one behind. MANDATORY makes a caller
+    with no transaction fail immediately, and `AuditIntegrationTest` asserts both
+    that and the rollback case. An aspect or a Hibernate listener was rejected
+    because it sees a row update, not intent: an admin's cancel and dunning's
+    cancel are the same `UPDATE`. Envers was rejected because it versions rows,
+    and almost nothing here is ever updated.
+  - **That surfaced a real gap first**: `ProductService`, `PlanService`,
+    `PlanEntitlementService`, `CustomerService` and `SubscriptionService` had no
+    `@Transactional` at all, so each repository call committed on its own. That
+    was harmless with one write per use case, and MANDATORY refused it as soon
+    as a second write (the event) existed. Made transactional in a separate
+    refactor commit. This does not prevent lost updates between concurrent
+    requests; there is no `@Version` anywhere.
+  - **Actor = kind + id, resolved from the security context** (`AuditActors`),
+    never passed by the caller. A `tenant_id` claim means `USER`, the
+    `PLATFORM_ADMIN` role means `PLATFORM_ADMIN`, and no JWT (a job, or a webhook's
+    anonymous token) means `SYSTEM`. A JWT of neither shape throws. The id is the
+    token subject (a UUID), never an email. A USER recording into a tenant other
+    than its token's throws too; no caller can do that today, so it is a guard,
+    not a code path.
+  - **Settlement and dunning record `SYSTEM` explicitly** (`recordSystem`). The
+    fake gateway settles inside the paying admin's request, while Stripe settles
+    in an unauthenticated webhook. Deriving the actor would log the same outcome
+    as USER under one provider and SYSTEM under the other. The fake is meant to
+    be the same shape as the real thing, and its audit trail is part of that
+    shape. `DunningIntegrationTest` pins it with a manual declined payment.
+  - **`AuditEventEntity` does not extend `TenantScoped`**, making it the second
+    entity after `AppUserEntity`, for a different reason. A platform request's
+    session is pinned to `__no_tenant__`, `@TenantId` rejects an insert for any
+    other tenant, and the provisioning event must commit in the provisioning
+    transaction, so a fresh session is not an option. As a side effect the
+    platform read endpoint needs no session handling at all.
+  - **Events** (`AuditEventType`, each bound to its `AuditEntityType` so a caller
+    cannot file an event under the wrong kind of record): product/plan/entitlement
+    created (the plan's price in `data`), customer created, payment method
+    set/removed (never the token), subscription created/canceled/paused/resumed,
+    plus `PAST_DUE`/`RECOVERED` from dunning, invoice issued/paid/uncollectible,
+    payment succeeded/failed, and tenant provisioned/deactivated/activated.
+    **Not audited**: renewals and usage increments (high volume, fully
+    derivable), reads, and logins (an unknown tenant cannot satisfy the FK, and
+    authentication events belong in logs and metrics).
+  - **Only real changes.** A refused transition (409), deactivating an inactive
+    tenant, or clearing an unset payment method writes nothing. A dunning
+    cancellation reuses `SUBSCRIPTION_CANCELED` with `reason = DUNNING_EXHAUSTED`,
+    and the actor tells the two cancellations apart.
+  - **Reads**: `GET /api/audit-events[?entityType=&entityId=]`, restricted to
+    `ADMIN`. This is the one read carrying a `@PreAuthorize` (`Authorize.AUDIT_READ`),
+    a deliberate exception to "unannotated reads are deliberate". Also
+    `GET /api/platform/tenants/{id}/audit-events`, where an unknown tenant is a
+    404 rather than an empty page. Half a filter is 400
+    `AUDIT_FILTER_INCOMPLETE`: silently returning the whole timeline would look
+    like one record's history. A tenant's admins see what the platform did to
+    their tenant as well.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -626,6 +685,7 @@ POST          /api/auth/token          (public)
 POST          /api/platform/auth/token (public)
 POST GET      /api/platform/tenants     (PLATFORM_ADMIN)
 GET            /api/platform/tenants/{id}
+GET            /api/platform/tenants/{id}/audit-events
 POST          /api/platform/tenants/{id}/deactivate
 POST          /api/platform/tenants/{id}/activate
 GET  /api/health                       (public)
@@ -647,6 +707,7 @@ PUT DELETE    /api/customers/{id}/payment-method
 POST GET      /api/invoices/{id}/payments   (POST needs an Idempotency-Key header)
 GET            /api/payments/{id}
 POST          /api/webhooks/stripe          (public; authenticated by signature)
+GET            /api/audit-events[?entityType=&entityId=]   (ADMIN)
 ```
 
 ---
@@ -736,9 +797,8 @@ feature module does.
   its own, implicitly inheriting the parent plan's; that's the one place a
   mismatch could hide today, invisible because the two are always read
   together.
-- `audit_event` table exists but nothing writes to it. No longer *blocked*,
-  though: it needed an authenticated principal to record in its `actor` column,
-  and there now is one — which is why CLAUDE.md §7 moved it after authentication.
+- ~~`audit_event` table exists but nothing writes to it~~ — closed by Audit
+  events (see Current state).
 - ~~Only `InvoiceStatus.OPEN` is ever set~~ — partly closed: payments produce
   `PAID`. `DRAFT`, `VOID` and `UNCOLLECTIBLE` remain declared and unreachable,
   still deliberately: `VOID` needs a cancellation path and `UNCOLLECTIBLE`
@@ -917,6 +977,35 @@ feature module does.
   deployment no longer *needs* them — they could be deactivated through it rather
   than deleted.
 
+**Audit events**
+
+- **Isolation is explicit only.** `audit_event` has no `@TenantId` backstop (see
+  Current state), so a future repository method that forgets `tenantId` would
+  leak across tenants with nothing to catch it. This is the same trade
+  `AppUserEntity` makes, and the reason the port has only three methods.
+- **Nothing makes it tamper-evident.** Append-only is a property of the
+  application code, not the database: anyone with SQL access can update or
+  delete a row. A real audit log would revoke `UPDATE`/`DELETE` from the
+  application role, or hash-chain rows, or ship them to write-once storage.
+- **It is deleted with its tenant.** `audit_event.tenant_id` still has V1's
+  `ON DELETE CASCADE`. Tenants are never deleted today (deactivation is the only
+  lifecycle), but the day deletion exists, the one record of what happened goes
+  with it. Retention also stays unbounded.
+- **Failed logins and authorization denials are not recorded**, deliberately:
+  they belong to Observability, as a metric and an alert on a spike.
+- **Two concurrent deactivations can both record.** `setActive` reads the flag,
+  then updates it, without a lock, so two simultaneous calls may each see
+  "active" and each write `TENANT_DEACTIVATED`. It is harmless and rare, and it
+  is not worth a lock.
+- **Ordering is by `created_at` only.** Two events in one transaction can share a
+  timestamp at the clock's resolution, and then their relative order in a
+  response is unspecified. No read depends on it today.
+- **A bad `entityType` value is a 500, not a 400** (verified live:
+  `?entityType=NOPE` returns `INTERNAL_ERROR`). `ProblemDetailsAdvice` has no
+  handler for Spring's `MethodArgumentTypeMismatchException`, so the failed
+  conversion reaches the catch-all. Other typed query parameters very likely do
+  the same, and one handler would fix all of them.
+
 **Tenant provisioning**
 
 - **The initial password is never forced to change.** There is no password-change
@@ -942,8 +1031,7 @@ feature module does.
 - **Missed periods cannot be waived.** The policy is to bill them, and deciding
   otherwise is the tenant's call per customer, but that needs a `VOID` invoice
   transition, which is still unreachable.
-- **Provisioning is not audited.** Creating or deactivating a tenant is exactly
-  what `audit_event` is for, and it is the next roadmap item.
+- ~~Provisioning is not audited~~ — closed by Audit events.
 - **Swagger UI and `/v3/api-docs` are public.** Convenient locally, and it exposes
   the full API shape to anyone who can reach the service. Fine for a portfolio, not
   for a real deployment.

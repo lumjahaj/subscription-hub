@@ -112,7 +112,7 @@ notification/    app, domain, infra/{jpa, sqs, mail, template}  (no api — an
                  outbox relay and a queue consumer, not endpoints)
 platform/        api, app  (no domain or infra — it orchestrates tenancy and
                  auth; exists because tenancy → auth would close a cycle)
-audit/           (not built)
+audit/           api, app, domain, infra/jpa
 ```
 
 `billing` was the first module with more than one `infra` package; `notification`
@@ -242,6 +242,16 @@ establishes it. Extending `TenantScoped` produced a self-contradicting
 `where tenant_id = '__no_tenant__' and tenant_id = 'acme'` and failed every login
 with correct credentials. Scoping stays explicit via `findByTenantIdAndEmail`, and
 the issued token takes its tenant from the row found rather than from the request.
+
+**`AuditEventEntity` is the second, for a different reason.** Platform
+administrators record events under the tenant they act on (provision,
+deactivate), from a request with no `TenantContext`, so the session is pinned to
+`__no_tenant__` and `@TenantId` would reject the insert. The event has to commit
+in the same transaction as the tenant change, which rules out the
+`PaymentWebhookService` fresh-session approach. The row is append-only as well,
+so `updated_at` would mean nothing. Every `AuditEventRepository` method takes the
+tenant, and `AuditIntegrationTest` proves one tenant cannot read another's
+events.
 
 ---
 
@@ -498,6 +508,30 @@ around when things are written to it and when the queue is touched.
   `elasticmq.conf` defines `notifications` and `notifications-dlq`; the app
   resolves them by name and never creates them.
 
+**Audit invariants** — an audit log is only worth anything if it cannot lie.
+- **Recorded in the change's transaction, explicitly.** `AuditService.record` is
+  `@Transactional(propagation = MANDATORY)`: an event commits with its change or
+  not at all, and a caller with no transaction fails at once. Never move it to
+  `@TransactionalEventListener(AFTER_COMMIT)` (a crash loses the row), `REQUIRES_NEW`
+  (a rolled-back change leaves an event behind), or an aspect (it sees the row
+  update, not the intent).
+- **Only real changes are recorded.** Idempotent no-ops (deactivating an inactive
+  tenant, clearing a payment method that isn't set) and refused transitions
+  (409s) write nothing.
+- **The actor is resolved, never passed.** `AuditActors` derives it from the
+  security context. A JWT that is neither a tenant nor a platform token throws
+  rather than being logged as `SYSTEM`.
+- **Outcomes are `SYSTEM` whatever thread they run on** (`recordSystem`): payment
+  settlement and dunning decisions. With the fake provider they run inside the
+  paying user's request, and with Stripe in a webhook. The audit trail must not
+  depend on the provider.
+- **No secrets and no personal data in `data`.** No passwords, no payment-method
+  tokens, no customer email or name, and actor ids not emails. Audit rows are
+  kept for good.
+- **Append-only.** No update or delete path in the port, and no write endpoint.
+  Renewals and usage increments are deliberately not audited: they are high
+  volume and fully derivable.
+
 **Tenant deactivation invariants** — deactivation means *suspended*: stop acting
 for the tenant, record what already happened, lose nothing, resume on reactivation.
 Full reasoning under Current state in the subscription-hub-state skill.
@@ -571,7 +605,8 @@ tenant (id varchar(64) PK — slug)
  │        └── notification (V14; unique tenant_id + dedup_key — invoice_id nullable, since not
  │                          every notification is about one; html_body/text_body rendered and
  │                          stored at enqueue time; relayed to SQS, delivered over SMTP)
- └── audit_event
+ └── audit_event        (V16 activates it: actor_type + actor_id, entity_type + entity_id
+                          NOT NULL, request_id; append-only, no @TenantId — see §4)
 
 invoice_number_sequence (tenant_id PK — per-tenant invoice numbering, V6)
 
@@ -597,21 +632,17 @@ usage metering, billing/invoice calculation, invoice PDFs (MinIO),
 JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
 settlement), dunning (automatic collection, retries, `PAST_DUE` →
 `UNCOLLECTIBLE`/`CANCELED`), notifications (transactional outbox → SQS →
-email, invoice-issued/payment-failed/subscription-canceled) and tenant
-provisioning (platform-admin principal and API) are done — see the
-subscription-hub-state skill.
+email, invoice-issued/payment-failed/subscription-canceled), tenant
+provisioning (platform-admin principal and API) and audit events (who changed
+what, in the change's transaction) are done — see the subscription-hub-state
+skill.
 
-Next: **Audit events** → Observability (Actuator, Micrometer, Prometheus,
-Grafana).
+Next: **Observability** (Actuator, Micrometer, Prometheus, Grafana).
 
-Two notes on that order:
-
-- **Audit events moved after authentication**, and had to. `audit_event` has an
-  `actor` column and the whole point of an audit log is recording *who* did
-  something; building it before there was an authenticated principal would have
-  meant writing `actor = null` and then rebuilding it. There are now two kinds of
-  actor — a tenant user and a platform administrator — and provisioning or
-  deactivating a tenant is exactly the kind of action an audit log exists for.
+- **Audit events moved after authentication**, and had to. The point of an
+  audit log is recording *who* did something, and building it before there was
+  an authenticated principal would have meant writing `actor = null` and then
+  rebuilding it.
 - **Observability still has to decide who may read metrics.** The platform
   principal now exists, so `/actuator/prometheus` can be restricted to it (or to a
   dedicated scrape credential); today `/actuator/**` accepts either kind of token.
