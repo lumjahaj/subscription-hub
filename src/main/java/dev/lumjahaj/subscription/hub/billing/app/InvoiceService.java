@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.billing.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceIssuedListener;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
@@ -34,6 +36,7 @@ public class InvoiceService {
     private final MeterPriceResolver meterPrices;
     private final int dueDays;
     private final List<InvoiceIssuedListener> listeners;
+    private final AuditService audit;
 
     /**
      * The listener list is injected rather than a single collaborator, and
@@ -47,7 +50,8 @@ public class InvoiceService {
             UsageCounterRepository usageCounters,
             MeterPriceResolver meterPrices,
             @Value("${billing.invoice.due-days}") int dueDays,
-            List<InvoiceIssuedListener> listeners
+            List<InvoiceIssuedListener> listeners,
+            AuditService audit
     ) {
         this.invoices = invoices;
         this.subscriptions = subscriptions;
@@ -55,6 +59,7 @@ public class InvoiceService {
         this.meterPrices = meterPrices;
         this.dueDays = dueDays;
         this.listeners = listeners;
+        this.audit = audit;
     }
 
     /**
@@ -110,6 +115,15 @@ public class InvoiceService {
         lines.forEach(invoice::addLine);
 
         InvoiceEntity saved = invoices.save(invoice);
+        // Attributed to whoever is acting: an admin calling the endpoint, or
+        // SYSTEM when BillingCycleJob issues it. Both are true.
+        audit.record(AuditEventType.INVOICE_ISSUED, saved.getId(), Map.of(
+                "number", saved.getNumber(),
+                "subscriptionId", subscription.getId(),
+                "totalCents", saved.getTotalCents(),
+                "currency", saved.getCurrency(),
+                "periodStart", saved.getPeriodStart(),
+                "periodEnd", saved.getPeriodEnd()));
         // Inside this transaction, like PaymentSettlementService's
         // notifyListeners: a listener that enqueues an outbox row and then
         // rolls back must take the invoice down with it, not leave an

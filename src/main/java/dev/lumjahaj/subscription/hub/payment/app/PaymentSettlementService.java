@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.payment.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
@@ -16,7 +18,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -41,6 +45,7 @@ public class PaymentSettlementService implements PaymentEventHandler {
     private final PaymentRepository payments;
     private final InvoiceRepository invoices;
     private final List<PaymentOutcomeListener> listeners;
+    private final AuditService audit;
 
     /**
      * The listener list is injected rather than a single collaborator, and
@@ -50,11 +55,13 @@ public class PaymentSettlementService implements PaymentEventHandler {
     public PaymentSettlementService(
             PaymentRepository payments,
             InvoiceRepository invoices,
-            List<PaymentOutcomeListener> listeners
+            List<PaymentOutcomeListener> listeners,
+            AuditService audit
     ) {
         this.payments = payments;
         this.invoices = invoices;
         this.listeners = listeners;
+        this.audit = audit;
     }
 
     /**
@@ -113,11 +120,28 @@ public class PaymentSettlementService implements PaymentEventHandler {
             }
         }
         payments.save(payment);
+        recordOutcome(payment);
 
         // After the payment is saved, and inside the same transaction: a
         // listener reacting to an outcome that then rolls back would leave a
         // subscription past due for a payment that never failed.
         notifyListeners(payment, event);
+    }
+
+    /** SYSTEM regardless of provider; see AuditService.recordSystem. */
+    private void recordOutcome(PaymentEntity payment) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("invoiceId", payment.getInvoice().getId());
+        data.put("amountCents", payment.getAmountCents());
+        data.put("currency", payment.getCurrency());
+        data.put("provider", payment.getProvider());
+        if (payment.getStatus() == PaymentStatus.FAILED && payment.getFailureCode() != null) {
+            data.put("failureCode", payment.getFailureCode());
+        }
+        AuditEventType type = payment.getStatus() == PaymentStatus.SUCCEEDED
+                ? AuditEventType.PAYMENT_SUCCEEDED
+                : AuditEventType.PAYMENT_FAILED;
+        audit.recordSystem(type, payment.getId(), data);
     }
 
     private void notifyListeners(PaymentEntity payment, PaymentEvent event) {
@@ -142,5 +166,8 @@ public class PaymentSettlementService implements PaymentEventHandler {
         invoice.setStatus(InvoiceStatus.PAID);
         invoice.setPaidAt(Instant.now());
         invoices.save(invoice);
+        audit.recordSystem(AuditEventType.INVOICE_PAID, invoice.getId(), Map.of(
+                "number", invoice.getNumber(),
+                "paymentId", payment.getId()));
     }
 }

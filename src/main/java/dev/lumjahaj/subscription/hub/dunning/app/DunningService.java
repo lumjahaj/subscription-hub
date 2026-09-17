@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.dunning.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
 import dev.lumjahaj.subscription.hub.billing.infra.jpa.InvoiceEntity;
@@ -19,6 +21,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -43,6 +46,7 @@ public class DunningService implements PaymentOutcomeListener {
     private final PaymentRepository payments;
     private final DunningSchedule schedule;
     private final NotificationService notificationService;
+    private final AuditService audit;
 
     public DunningService(
             DunningStateRepository dunningStates,
@@ -50,7 +54,8 @@ public class DunningService implements PaymentOutcomeListener {
             SubscriptionRepository subscriptions,
             PaymentRepository payments,
             DunningSchedule schedule,
-            NotificationService notificationService
+            NotificationService notificationService,
+            AuditService audit
     ) {
         this.dunningStates = dunningStates;
         this.invoices = invoices;
@@ -58,6 +63,7 @@ public class DunningService implements PaymentOutcomeListener {
         this.payments = payments;
         this.schedule = schedule;
         this.notificationService = notificationService;
+        this.audit = audit;
     }
 
     /**
@@ -81,6 +87,8 @@ public class DunningService implements PaymentOutcomeListener {
             if (subscription.getStatus() == SubscriptionStatus.PAST_DUE) {
                 subscription.setStatus(SubscriptionStatus.ACTIVE);
                 subscriptions.save(subscription);
+                audit.recordSystem(AuditEventType.SUBSCRIPTION_RECOVERED, subscription.getId(),
+                        Map.of("invoiceId", invoiceId));
                 log.info("Subscription {} recovered from PAST_DUE after invoice {} was paid",
                         subscription.getId(), invoice.getNumber());
             }
@@ -211,6 +219,9 @@ public class DunningService implements PaymentOutcomeListener {
         }
         subscription.setStatus(SubscriptionStatus.PAST_DUE);
         subscriptions.save(subscription);
+        audit.recordSystem(AuditEventType.SUBSCRIPTION_PAST_DUE, subscription.getId(), Map.of(
+                "from", status,
+                "invoiceId", invoice.getId()));
         log.info("Subscription {} is PAST_DUE after a failed payment for invoice {}",
                 subscription.getId(), invoice.getNumber());
     }
@@ -218,12 +229,22 @@ public class DunningService implements PaymentOutcomeListener {
     private void giveUp(InvoiceEntity invoice, DunningStateEntity state, String failureCode) {
         invoice.setStatus(InvoiceStatus.UNCOLLECTIBLE);
         invoices.save(invoice);
+        audit.recordSystem(AuditEventType.INVOICE_UNCOLLECTIBLE, invoice.getId(), Map.of(
+                "number", invoice.getNumber(),
+                "attempts", state.getAttemptCount()));
 
         SubscriptionEntity subscription = invoice.getSubscription();
         if (subscription.getStatus() != SubscriptionStatus.CANCELED) {
+            SubscriptionStatus from = subscription.getStatus();
             subscription.setStatus(SubscriptionStatus.CANCELED);
             subscription.setCanceledAt(Instant.now());
             subscriptions.save(subscription);
+            // The same event type as an admin's cancellation; the actor and
+            // the reason are what tell the two apart.
+            audit.recordSystem(AuditEventType.SUBSCRIPTION_CANCELED, subscription.getId(), Map.of(
+                    "from", from,
+                    "reason", "DUNNING_EXHAUSTED",
+                    "invoiceId", invoice.getId()));
         }
 
         // The schedule has served its purpose; the invoice's status and its

@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.dunning.app;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.lumjahaj.subscription.hub.billing.api.dto.InvoiceResponse;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanResponse;
@@ -111,6 +112,34 @@ class DunningIntegrationTest extends AbstractIntegrationTest {
         // The schedule is gone; the failed payments remain as the record.
         assertThat(dunningRowExists(fixture.invoiceId())).isFalse();
         assertThat(paymentsFor(fixture.invoiceId())).hasSize(2);
+
+        JsonNode canceled = auditHistory(TENANT, "SUBSCRIPTION", fixture.subscriptionId()).get(0);
+        assertThat(canceled.get("type").asText()).isEqualTo("SUBSCRIPTION_CANCELED");
+        assertThat(canceled.get("actorType").asText()).isEqualTo("SYSTEM");
+        assertThat(canceled.get("data").get("reason").asText()).isEqualTo("DUNNING_EXHAUSTED");
+        assertThat(auditHistory(TENANT, "INVOICE", fixture.invoiceId()))
+                .extracting(event -> event.get("type").asText())
+                .containsExactly("INVOICE_UNCOLLECTIBLE", "INVOICE_ISSUED");
+    }
+
+    @Test
+    void aDeclinedManualPayment_isAuditedAsSystemAlthoughAUserStartedIt() {
+        // The fake settles inside the admin's own request, so the security
+        // context holds a USER. Stripe would settle the same payment in an
+        // unauthenticated webhook. The audit log must not depend on which.
+        Fixture fixture = openInvoice();
+
+        payManually(fixture.invoiceId(), DECLINED);
+
+        UUID paymentId = paymentsFor(fixture.invoiceId()).get(0).id();
+        JsonNode failed = auditHistory(TENANT, "PAYMENT", paymentId).get(0);
+        assertThat(failed.get("type").asText()).isEqualTo("PAYMENT_FAILED");
+        assertThat(failed.get("actorType").asText()).isEqualTo("SYSTEM");
+        assertThat(failed.get("data").get("failureCode").asText()).isEqualTo("card_declined");
+
+        JsonNode pastDue = auditHistory(TENANT, "SUBSCRIPTION", fixture.subscriptionId()).get(0);
+        assertThat(pastDue.get("type").asText()).isEqualTo("SUBSCRIPTION_PAST_DUE");
+        assertThat(pastDue.get("actorType").asText()).isEqualTo("SYSTEM");
     }
 
     @Test
@@ -127,6 +156,12 @@ class DunningIntegrationTest extends AbstractIntegrationTest {
         assertThat(invoiceStatus(fixture.invoiceId())).isEqualTo("PAID");
         assertThat(subscriptionStatus(fixture.subscriptionId())).isEqualTo("ACTIVE");
         assertThat(dunningRowExists(fixture.invoiceId())).isFalse();
+
+        assertThat(auditHistory(TENANT, "SUBSCRIPTION", fixture.subscriptionId()))
+                .extracting(event -> event.get("type").asText())
+                .startsWith("SUBSCRIPTION_RECOVERED", "SUBSCRIPTION_PAST_DUE");
+        assertThat(auditHistory(TENANT, "INVOICE", fixture.invoiceId()).get(0).get("type").asText())
+                .isEqualTo("INVOICE_PAID");
     }
 
     @Test
