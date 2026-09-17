@@ -39,6 +39,14 @@ public final class Authorize {
     public static final String COMMERCIAL = "hasAnyRole('ADMIN', 'BILLING')";
 
     /**
+     * Reading the audit log. This is the one read that carries a rule, which
+     * makes it a deliberate exception to the convention above. The log shows
+     * who did what to every record, and that is an administrator's view, not
+     * a billing clerk's or a support agent's.
+     */
+    public static final String AUDIT_READ = "hasRole('ADMIN')";
+
+    /**
      * Operating the platform across tenants. SecurityConfig already requires
      * this role for every /api/platform/** path, so on those controllers the
      * annotation is defence in depth, kept so the rule stays visible next to
