@@ -5,8 +5,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 
 import java.sql.SQLException;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -56,6 +58,19 @@ class ProblemDetailsAdviceTest {
         ProblemDetail problem = advice.handleDataIntegrityViolation(ex);
 
         assertThat(problem.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+    }
+
+    // Directly rather than over HTTP: no endpoint declares a required query
+    // parameter today, so there is no request that could raise this.
+    @Test
+    void missingRequiredQueryParameterIs400() {
+        ProblemDetail problem = advice.handleMissingParameter(
+                new MissingServletRequestParameterException("customerId", "UUID"));
+
+        assertThat(problem.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST.value());
+        assertThat(problem.getProperties())
+                .containsEntry("code", "VALIDATION_ERROR")
+                .containsEntry("details", List.of("customerId parameter is required"));
     }
 
     private String codeFor(String constraintName) {
