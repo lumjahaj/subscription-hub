@@ -1,0 +1,80 @@
+### Observability endpoints.
+### /actuator/prometheus is readable only by the scrape account
+### (METRICS_SCRAPE_USERNAME / METRICS_SCRAPE_PASSWORD in .env), never by a
+### tenant or platform token. The values below are the .env.example defaults.
+
+### Metrics as the scrape account (expects 200, Prometheus text format)
+### Look for jobs_last_success_seconds, notification_outbox_oldest_age_seconds,
+### audit_events_total and hikaricp_connections_active.
+GET {{baseUrl}}/actuator/prometheus
+Authorization: Basic prometheus dev-only-scrape-password
+
+### Metrics without credentials (expects 401 UNAUTHENTICATED)
+GET {{baseUrl}}/actuator/prometheus
+
+### Metrics with the wrong password (expects 401)
+GET {{baseUrl}}/actuator/prometheus
+Authorization: Basic prometheus not-the-password
+
+### Auth — log in as acme's seeded admin, for the checks below
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Metrics with a tenant admin's token (expects 401: that chain reads no bearer tokens)
+GET {{baseUrl}}/actuator/prometheus
+Authorization: Bearer {{acmeToken}}
+
+### Auth — the seeded platform administrator
+POST {{baseUrl}}/api/platform/auth/token
+Content-Type: application/json
+
+{
+  "email": "platform@subscriptionhub.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("platformToken", response.body.token);
+%}
+
+### Metrics with a platform token (expects 401: operating the platform is not scraping it)
+GET {{baseUrl}}/actuator/prometheus
+Authorization: Bearer {{platformToken}}
+
+### The scrape account on a tenant endpoint (expects 401: Basic exists only on the metrics chain)
+GET {{baseUrl}}/api/products
+Authorization: Basic prometheus dev-only-scrape-password
+
+### Other actuator endpoints as a tenant admin (expects 403: platform infrastructure)
+GET {{baseUrl}}/actuator/info
+Authorization: Bearer {{acmeToken}}
+
+### Other actuator endpoints as the platform administrator (expects 200)
+GET {{baseUrl}}/actuator/info
+Authorization: Bearer {{platformToken}}
+
+### Liveness probe (expects 200, public)
+GET {{baseUrl}}/actuator/health/liveness
+
+### Readiness probe (expects 200 once startup, including ApplicationRunners, has finished)
+GET {{baseUrl}}/actuator/health/readiness
+
+### A failed login, to watch auth_login_failures_total{principal="tenant"} go up
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "wrong-password"
+}
