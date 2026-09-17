@@ -6,6 +6,14 @@ spring:
     username: ${POSTGRES_USER}
     password: ${POSTGRES_PASSWORD}
   jpa:
+    # Off, so a request holds a Hibernate session - and, under the
+    # DELAYED_ACQUISITION_AND_HOLD mode Spring configures, its JDBC connection -
+    # only for the transactions it runs, not until the response is written.
+    # With it on, PaymentService's provider call and PDF streaming held a pool
+    # connection for their whole duration even with no transaction open. The
+    # cost is that every association a response reads must be loaded
+    # explicitly: see the @EntityGraph finders and InvoiceRepositoryImpl.
+    open-in-view: false
     hibernate:
       ddl-auto: validate
     properties:

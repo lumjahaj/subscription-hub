@@ -16,14 +16,18 @@ import java.util.UUID;
  * <p><b>The second tenant-owned entity that does not extend TenantScoped</b>,
  * after AppUserEntity, and for a different reason. Some events are recorded
  * by a platform administrator on a tenant's behalf (provisioning,
- * deactivation). A platform request has no TenantContext, so with
- * open-in-view its Hibernate session is pinned to the
- * {@code __no_tenant__} sentinel - and {@code @TenantId} rejects an insert
- * whose tenant differs from the session's. Those events must commit in the
- * same transaction as the tenant change they describe, so the
- * PaymentWebhookService trick of opening a fresh session is not available
- * either. It also saves the platform read endpoint that same session
- * treatment.
+ * deactivation). A platform request has no TenantContext, so the session its
+ * transaction opens is pinned to the {@code __no_tenant__} sentinel - and
+ * {@code @TenantId} rejects an insert whose tenant differs from the
+ * session's. Those events must commit in the same transaction as the tenant
+ * change they describe.
+ *
+ * <p>Since open-in-view was turned off this is no longer forced: wrapping
+ * each whole platform transaction in TenantContext.runAs(targetTenant) would
+ * let the entity extend TenantScoped. It is left as it is on purpose - that
+ * would make every platform use case responsible for choosing a tenant
+ * before its transaction starts, to save a predicate this port already
+ * states explicitly.
  *
  * <p>It is also append-only, so TenantScoped's updated_at would be a column
  * that can never mean anything.

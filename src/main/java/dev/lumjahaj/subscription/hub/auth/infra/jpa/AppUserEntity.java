@@ -16,14 +16,16 @@ import java.util.UUID;
  * TenantScoped.</b> Everything else does, which adds Hibernate's
  * automatic {@code tenant_id = <current tenant>} predicate via
  * {@code @TenantId}. That predicate is resolved from TenantContext when
- * the Hibernate Session opens — and with {@code spring.jpa.open-in-view}
- * enabled, the session opens at the *start of the request*, before any
- * controller runs.
+ * the Hibernate Session opens. (It was first found with
+ * {@code spring.jpa.open-in-view} on, when the session opened at the start
+ * of the request; with it off, the session opens with AuthService's
+ * transaction instead, which changes nothing here.)
  *
  * <p>For every other entity that is fine: the tenant is already in
  * context, put there by TenantResolverFilter. For this one it cannot be,
- * because reading this table is what establishes which tenant the caller
- * belongs to. Extending TenantScoped produced a genuinely
+ * because a login request carries no token, and reading this table is what
+ * establishes which tenant the caller belongs to. Extending TenantScoped
+ * produced a genuinely
  * self-contradicting query —
  * {@code where tenant_id = '__no_tenant__' and tenant_id = 'acme'} — so
  * every login failed with correct credentials. A chicken-and-egg, not a

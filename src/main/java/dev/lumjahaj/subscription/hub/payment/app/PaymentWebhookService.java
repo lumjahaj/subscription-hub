@@ -5,12 +5,10 @@ import dev.lumjahaj.subscription.hub.payment.domain.PaymentEventHandler;
 import dev.lumjahaj.subscription.hub.payment.domain.ProviderWebhook;
 import dev.lumjahaj.subscription.hub.payment.domain.WebhookVerificationException;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
-import jakarta.persistence.EntityManagerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Optional;
@@ -19,9 +17,8 @@ import java.util.Optional;
  * Entry point for provider webhooks: verify, then settle.
  *
  * Settlement itself is the same PaymentSettlementService the fake gateway
- * drives — this class only establishes the two things a webhook request
- * lacks and an API request has: a tenant, and a Hibernate session that
- * knows about it.
+ * drives — this class only establishes the one thing a webhook request
+ * lacks and an API request has: a tenant.
  */
 @Service
 public class PaymentWebhookService {
@@ -30,18 +27,15 @@ public class PaymentWebhookService {
 
     private final ProviderWebhook webhook;
     private final PaymentEventHandler settlement;
-    private final EntityManagerFactory entityManagerFactory;
     private final TransactionTemplate transaction;
 
     public PaymentWebhookService(
             ProviderWebhook webhook,
             PaymentEventHandler settlement,
-            EntityManagerFactory entityManagerFactory,
             PlatformTransactionManager transactionManager
     ) {
         this.webhook = webhook;
         this.settlement = settlement;
-        this.entityManagerFactory = entityManagerFactory;
         this.transaction = new TransactionTemplate(transactionManager);
     }
 
@@ -67,33 +61,19 @@ public class PaymentWebhookService {
      * a mis-tagged event finds nothing rather than touching another
      * tenant's row.
      *
-     * <p><b>Why the EntityManager is detached first.</b> A webhook request
-     * carries no token, so TenantContext is empty when
-     * {@code spring.jpa.open-in-view} opens the request's EntityManager —
-     * and Hibernate resolves {@code @TenantId} when a session opens, not
-     * when a query runs. Every query on that session is therefore pinned to
-     * TenantIdentifierResolver's {@code __no_tenant__} sentinel and matches
-     * no row: the same chicken-and-egg documented for AppUserEntity
-     * (CLAUDE.md §4), arriving from the other direction.
-     *
-     * <p>PROPAGATION_REQUIRES_NEW does <em>not</em> fix it, which is worth
-     * knowing: suspension only happens when a transaction is already
-     * active, and open-in-view binds an EntityManager without one — so
-     * JpaTransactionManager simply adopts the bound EntityManager and its
-     * sentinel tenant. Unbinding it for the duration is what forces a
-     * genuinely new session, opened after the tenant is set. It is rebound
-     * afterwards so open-in-view still closes it at the end of the request.
+     * <p>The tenant is set before the transaction starts because Hibernate
+     * resolves {@code @TenantId} when a session opens, and the session opens
+     * with the transaction. This used to need more: with
+     * {@code spring.jpa.open-in-view} on, the request had already opened an
+     * EntityManager - pinned to the {@code __no_tenant__} sentinel, since a
+     * webhook carries no token - and every transaction adopted it, so this
+     * method had to unbind it and rebind it afterwards. (PROPAGATION_REQUIRES_NEW
+     * did not help: with no transaction active there was nothing to suspend.)
+     * Open-in-view is off now, nothing is bound to the request, and a
+     * transaction opened inside runAs gets a session scoped to the right tenant.
      */
     private void settle(PaymentEvent event) {
-        Object requestScopedEntityManager =
-                TransactionSynchronizationManager.unbindResourceIfPossible(entityManagerFactory);
-        try {
-            TenantContext.runAs(event.tenantId(),
-                    () -> transaction.executeWithoutResult(status -> settlement.handle(event)));
-        } finally {
-            if (requestScopedEntityManager != null) {
-                TransactionSynchronizationManager.bindResource(entityManagerFactory, requestScopedEntityManager);
-            }
-        }
+        TenantContext.runAs(event.tenantId(),
+                () -> transaction.executeWithoutResult(status -> settlement.handle(event)));
     }
 }
