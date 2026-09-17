@@ -40,7 +40,8 @@ Java 21 · Spring Boot 3.5.6 · Maven · Spring Web / Data JPA / Validation /
 Security · Hibernate 6 · PostgreSQL 17 · Flyway · Testcontainers · Docker Compose ·
 springdoc-openapi 2.8.x · MinIO (invoice PDFs) · AWS SDK v2 for S3 ·
 openhtmltopdf + Thymeleaf · stripe-java (payments) · Spring Cloud AWS SQS +
-ElasticMQ (notifications) · spring-boot-starter-mail + Mailpit (email)
+ElasticMQ (notifications) · spring-boot-starter-mail + Mailpit (email) ·
+Micrometer + Prometheus + Grafana (observability)
 
 The object store is reached with the **AWS SDK, not the MinIO client** — MinIO is
 S3-compatible, so the vendor stays a config value and the same adapter works
@@ -76,7 +77,15 @@ same process; an external IdP would use RSA + JWKS and change only `issuer-uri`,
 since the verification side is already the standard machinery — the same
 "code against the standard, keep the provider a config value" shape as MinIO/S3.
 
-Planned: Redis, WireMock, Micrometer, Prometheus, Grafana.
+Planned: Redis, WireMock.
+
+**Metrics are read by one account, not by a token.** `/actuator/prometheus` has
+its own `SecurityFilterChain` (`MetricsSecurityConfig`, ordered first) that
+accepts HTTP Basic for `METRICS_SCRAPE_USERNAME`/`PASSWORD` and nothing else:
+Prometheus holds a static secret and this application's JWTs expire hourly, and a
+leaked scrape secret should open the metrics and nothing more. Prometheus and
+Grafana run in Compose against the app on the host; the dashboard and alert rules
+are files in `docker/`, not clicks.
 
 **Free, and runnable from a clean clone.** Nothing requires a paid service. With
 only Docker, the app boots and the full test suite passes offline, with no
@@ -98,7 +107,7 @@ Base package: `dev.lumjahaj.subscription.hub`
 Feature-based modules, each with the same internal layering:
 
 ```
-common/          api, logging, web — cross-cutting, depends on nothing
+common/          api, logging, metrics, web — cross-cutting, depends on nothing
 auth/            api, app, domain, infra/jpa
 tenancy/         api, domain, infra/jpa
 catalog/         api, app, domain, infra/jpa
@@ -216,10 +225,14 @@ on every tenant-owned table.
 `findByTenantIdAndCode(...)`, never `findByCode(...)`. This is no longer the
 *only* thing enforcing isolation — see Known gaps and improvements in the subscription-hub-state skill — but it stays mandatory as defense
 in depth: the structural backstop only covers Hibernate-mediated queries, not
-a native/`nativeQuery = true` one. There are now two of those —
+a native/`nativeQuery = true` one. There are now two tenant-scoped ones —
 `UsageCounterJpaRepository.upsertAndIncrement` and
 `InvoiceJpaRepository.allocateNextNumber` (see Current state in the subscription-hub-state skill) — and `tenantId` is bound
-explicitly in both for exactly this reason.
+explicitly in both for exactly this reason. A third,
+`NotificationJpaRepository.oldestAgeSecondsAcrossActiveTenants`, is cross-tenant
+*on purpose*: it feeds the outbox-age gauge during a metrics scrape, which has no
+tenant, and returns one aggregate number and no rows. A new native query must be
+one of those two kinds, and say which.
 
 **A provider webhook has the same chicken-and-egg, from the other side.**
 `POST /api/webhooks/stripe` carries no token, so `TenantContext` is empty when
@@ -527,6 +540,36 @@ around when things are written to it and when the queue is touched.
   `elasticmq.conf` defines `notifications` and `notifications-dlq`; the app
   resolves them by name and never creates them.
 
+**Metrics invariants** — each looks harmless and quietly makes a metric lie or
+explode.
+- **Never tag a meter with a tenant, email, id or anything else unbounded.**
+  Every distinct label value is a new time series held in memory forever;
+  per-tenant labels are the classic way to take Prometheus down. Per-tenant
+  questions belong in the logs, which carry `tenant=` on every request line.
+- **Never name a tag `job` or `instance`.** Prometheus attaches both to every
+  scraped series and renames a clashing application label to `exported_job`, so a
+  rule filtering on it silently matches nothing. It happened: `JobMetrics` used
+  `job`, every test passed, and only a live scrape showed it. The tag is
+  `scheduled.job`, and `BusinessMetricsIntegrationTest` now asserts no meter uses
+  either name.
+- **Business counters count what committed.** Increment through
+  `AfterCommit.run`, never inline in a transaction, or a rollback counts something
+  that never happened. The opposite of the audit rule on purpose: an audit row
+  commits *with* its change; a metric only describes what did.
+- **Business events come from `audit.events`**, which `AuditService` increments
+  for every recorded event, tagged by type and actor. Don't add a parallel counter
+  next to an audit call. Add one only for what is deliberately not audited
+  (renewals, failed logins) or for a dimension the event lacks (payment provider,
+  dunning attempts).
+- **A job that stops produces no error, only an absence.** Every scheduled job runs
+  through `JobMetrics.run`, whose `jobs.last.success` gauge is what alerts on it,
+  and reports caught per-item failures with `itemFailed`. A new job does the same.
+- **Metrics are read only by the scrape account.** Never add `/actuator/prometheus`
+  to the main chain or accept a JWT for it.
+- **`@AutoConfigureObservability` stays on `AbstractIntegrationTest`.**
+  `@SpringBootTest` otherwise swaps every exporter for a `SimpleMeterRegistry`, and
+  `/actuator/prometheus` does not exist in tests at all.
+
 **Audit invariants** — an audit log is only worth anything if it cannot lie.
 - **Recorded in the change's transaction, explicitly.** `AuditService.record` is
   `@Transactional(propagation = MANDATORY)`: an event commits with its change or
@@ -669,8 +712,9 @@ subscription-hub-state skill's Known gaps):
    would reprice every subscriber's unbilled period. `tenant` got a conditional
    UPDATE instead of `@Version`: activation is an idempotent command, and the
    loser of a race should get the no-op, not a 409.
-3. **Observability** (Actuator, Micrometer, Prometheus, Grafana). Decides who may
-   read metrics.
+3. ~~**Observability**~~ Done: `/actuator/prometheus` behind a dedicated scrape
+   account, job/business/outbox/login metrics, liveness and readiness probes, and
+   Prometheus + Grafana in Compose with alert rules and a provisioned dashboard.
 4. **`spring.jpa.open-in-view` off, plus `@Version` on `subscription`.** Measured
    with the connection-pool metrics from step 3. The subscription step needs a
    retry-or-skip policy in dunning/settlement first, because those are its writers.
@@ -679,9 +723,9 @@ subscription-hub-state skill's Known gaps):
   audit log is recording *who* did something, and building it before there was
   an authenticated principal would have meant writing `actor = null` and then
   rebuilding it.
-- **Observability still has to decide who may read metrics.** The platform
-  principal now exists, so `/actuator/prometheus` can be restricted to it (or to a
-  dedicated scrape credential); today `/actuator/**` accepts either kind of token.
+- **Metrics got their own account, not the platform principal.** Restricting
+  `/actuator/prometheus` to `PLATFORM_ADMIN` would have meant Prometheus holding an
+  hourly-expiring JWT. The rest of `/actuator/**` is now `PLATFORM_ADMIN` only.
 
 ---
 

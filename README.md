@@ -64,9 +64,13 @@ tenants (SaaS customers) from one deployment:
   the change, attributed to a tenant user, a platform administrator, or the
   system. A tenant's admins read it at `GET /api/audit-events`, and platform
   administrators read it per tenant.
+- **Observability** exposes Prometheus metrics to a dedicated scrape account:
+  HTTP and connection-pool metrics, plus the ones a billing system actually needs
+  (scheduled job health, invoices, payments, dunning recoveries, outbox age,
+  failed logins). Prometheus and Grafana run in Docker Compose with alert rules
+  and a provisioned dashboard.
 
-Observability is on the roadmap but not yet built —
-see [`CLAUDE.md`](CLAUDE.md) for the architecture and conventions, and the
+See [`CLAUDE.md`](CLAUDE.md) for the architecture and conventions, and the
 state skill linked at the bottom for the detailed current state and an
 honest list of what's deliberately missing.
 
@@ -402,6 +406,32 @@ webhook, and the audit trail must not depend on which provider is configured.
 events under the tenant they act on, from a request that has no tenant. Every
 read takes the tenant explicitly instead.
 
+### Observability
+
+`/actuator/prometheus` is readable only by one scrape account
+(`METRICS_SCRAPE_USERNAME`/`METRICS_SCRAPE_PASSWORD`), through its own Spring
+Security filter chain. Prometheus cannot hold a JWT that expires hourly, and a
+leaked scrape secret should open the metrics and nothing else. The rest of
+`/actuator` belongs to the platform administrator; the liveness and readiness
+probes are public.
+
+The metrics that matter beyond HTTP and the JVM:
+
+| Metric | What it catches |
+|---|---|
+| `jobs_last_success_seconds{scheduled_job}` | A scheduled job that stopped. That produces no error, only an absence, and this is how an absence alerts. |
+| `jobs_item_failures_total{scheduled_job, step}` | A run that "succeeds" while skipping every item it catches failing. |
+| `notification_outbox_oldest_age_seconds{status}` | `PENDING` growing: the relay is stuck. `PUBLISHED` growing: messages never delivered, or dead-lettered. |
+| `audit_events_total{type, actor}` | Business events (invoices issued and paid, subscriptions past due, recovered and canceled), counted only once committed. |
+| `payments_settled_total{outcome, provider}`, `dunning_recoveries_total{attempts}` | Whether collection works, and after how many retries. |
+| `auth_login_failures_total{principal}` | Brute force against a login that has no rate limiting. |
+| `hikaricp_connections_*` | Pool exhaustion, e.g. a connection held across a slow provider call. |
+
+Nothing is tagged with a tenant: every label value is a separate series, and
+tenants are unbounded. Per-tenant questions go to the logs, where every request
+line carries `tenant=`. Alert rules live in `docker/prometheus/alerts.yml`, and
+the dashboard is `docker/grafana/dashboards/subscription-hub.json`.
+
 ### Error handling
 
 Errors are returned as RFC 7807 `application/problem+json`, with a `code`
@@ -472,6 +502,8 @@ This brings up:
 | Mailpit inbox  | http://localhost:8025    | Every email the app sends lands here; nothing leaves the machine |
 | ElasticMQ (SQS)| `localhost:9324`         | Used by the app as the notification queue — no credentials needed |
 | ElasticMQ UI   | http://localhost:9325    | Browse queue depth for `notifications`/`notifications-dlq` |
+| Prometheus     | http://localhost:9090    | Scrapes the app on the host as the scrape account from `.env`; firing alerts under **Alerts** |
+| Grafana        | http://localhost:3000    | Login with `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD` from `.env`; the **Subscription Hub** dashboard is provisioned |
 
 Flyway runs the schema migrations automatically on application startup, and the
 `invoices` bucket is created on the first PDF upload — no manual `psql` or

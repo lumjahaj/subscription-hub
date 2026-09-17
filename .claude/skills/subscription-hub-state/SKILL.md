@@ -713,6 +713,109 @@ description: What is built in Subscription Hub, why each decision was made, and 
     The rule it leaves behind: optimistic locking is for edits made from
     something the caller read earlier; conditional updates are for state
     commands.
+- **Observability** — `micrometer-registry-prometheus`, a second security filter
+  chain, `common/metrics`, and Prometheus + Grafana in Compose
+  (`docker/prometheus`, `docker/grafana`). It was preceded by two roadmap steps
+  so its numbers would mean something: the error-mapping sweep, so a caller's typo
+  is not a 5xx, and a logging fix, so log lines carry the tenant.
+  - **The log pattern had never shown a tenant.** `logging.pattern.console` read
+    `%X{tenant}`, while every writer (`TenantResolverFilter`, the three jobs) uses
+    `MdcKeys.TENANT_ID`, `"tenantId"`. A pattern naming a missing key prints an
+    empty string, so every line said `tenant=` and nothing failed. Found while
+    reading today's live-run log for the observability survey.
+    `LogPatternIntegrationTest` logs through the configured pattern with the real
+    constants.
+  - **Who reads metrics: a dedicated scrape account, through its own chain.**
+    `MetricsSecurityConfig` orders a `SecurityFilterChain` ahead of the main one,
+    matching only `/actuator/prometheus`, with HTTP Basic against one in-memory
+    account from `METRICS_SCRAPE_USERNAME`/`PASSWORD`.
+    - **Not a JWT:** Prometheus holds a static secret, and tokens expire hourly.
+    - **Not the platform principal:** operating the platform is not scraping it,
+      and a leaked scrape secret should open metrics and nothing else.
+    - **A separate chain, not a rule in the main one:** enabling Basic there would
+      make it an accepted scheme on every tenant endpoint.
+    - **Unconfigured means closed.** With neither variable set, every scrape is
+      401. With one set but not the other, or a password under 16 characters,
+      startup fails (`MetricsScrapeCredential`).
+    - **The rest of `/actuator/**` moved from any token to `PLATFORM_ADMIN`.**
+    - **Rejected:** a separate `management.server.port` behind network isolation,
+      because it would have needed verifying how Boot 3.5 applies a custom chain
+      to the management context.
+  - **Probes:** `/actuator/health/liveness` and `/readiness` are enabled and
+    public. Readiness only reports UP after `ApplicationRunner`s finish, which
+    covers the documented race where a login fired at "Started" could 401 before
+    `PlatformAdminBootstrap` ran.
+  - **`http.server.requests` publishes histogram buckets**, so p95 is computed in
+    Prometheus. Client-side percentiles cannot be aggregated across instances.
+  - **Job health: `JobMetrics`.** All three jobs run through it:
+    - `jobs.run` timer, tagged `scheduled.job` and `outcome`
+    - `jobs.item.failures`, tagged `scheduled.job` and `step`, for the failures
+      each job catches and logs so one bad item does not stop the run
+    - `jobs.last.success`, a gauge of epoch seconds
+
+    That gauge is the alertable one: a job that stops produces no error, only an
+    absence, and `time() - jobs_last_success_seconds` turns an absence into a
+    number that grows.
+  - **Business events come from the audit log.** `AuditService` increments
+    `audit.events{type, actor}` for every recorded event. Audit events are
+    already exactly the real, committed business changes (invoices issued, paid
+    and written off, subscriptions past due, recovered and canceled, payments
+    succeeded and failed), so a parallel set of increments next to each audit call
+    would only be something to drift. Separate counters exist only for:
+    - what is deliberately not audited: `subscription.renewals`,
+      `auth.login.failures{principal}`
+    - a dimension an event lacks: `payments.settled{outcome, provider}`,
+      `dunning.recoveries{attempts}`
+    - things that are not events at all: `dunning.attempts.started`,
+      `notification.published`, `notification.deliveries{outcome}`
+  - **Business counters count only committed work.** `AfterCommit.run` defers
+    the increment to `afterCommit`, so a rolled-back invoice is not counted.
+    `BusinessMetricsIntegrationTest` asserts a rollback leaves the counter
+    unchanged. This is the opposite choice from the audit row on purpose: the row
+    must commit with its change, while a metric only describes what did. A crash
+    between commit and increment loses one count, and counters already reset on
+    restart.
+  - **Outbox health is a gauge read at scrape time.**
+    `notification.outbox.oldest.age{status}` is the seconds since the oldest
+    `PENDING` row (the relay is stuck) and the oldest `PUBLISHED` row (published
+    but never delivered, or dead-lettered). Nothing reads `notifications-dlq`, so
+    this gauge is the only thing that notices a dead-lettered message.
+    - Read from the database on each scrape rather than cached by the relay, so it
+      stays honest exactly when the relay is what stopped.
+    - It is the codebase's third native query, and the first cross-tenant one:
+      `NotificationJpaRepository.oldestAgeSecondsAcrossActiveTenants` returns one
+      number and no rows, excludes inactive tenants (whose rows are held on
+      purpose), and computes age with the database clock.
+  - **No tenant labels anywhere.** Every label value is a separate series, and
+    tenants are unbounded. Per-tenant questions go to the logs. Failed logins
+    carry no reason tag either: one reason for every failure is the enumeration
+    defence, and `/actuator/prometheus` must not undo it.
+  - **One real bug only a live scrape showed.** `JobMetrics` first tagged its
+    meters `job`. Prometheus attaches its own `job` label (the scrape target) to
+    every series and renamed the application's to `exported_job`, so every
+    `{job="billing-cycle"}` in the alert rules and dashboard would have matched
+    nothing. The full suite passed with it, because the tests read the registry,
+    not Prometheus. Renamed to `scheduled.job`, and
+    `noMeter_usesALabelPrometheusReservesForTheScrapeTarget` now fails on `job`
+    or `instance`.
+  - **In Compose:**
+    - **Prometheus** (`prom/prometheus:v3.5.0`) scrapes `host.docker.internal:8080`.
+      `prometheus.yml` cannot read environment variables, so the entrypoint writes
+      `METRICS_SCRAPE_PASSWORD` to the `password_file` it points at. The username
+      is fixed as `prometheus` and must match `.env`.
+    - **Ten alert rules** (`alerts.yml`): app down or the scrape credential wrong,
+      5xx ratio, each job stale, items failing, outbox not published or not
+      delivered, login spike, connection pool saturated.
+    - **Grafana** (`grafana/grafana:12.1.1`) is provisioned with the datasource
+      and one dashboard: HTTP, Hikari, jobs, billing and collection,
+      notifications, JVM.
+  - **Verified live, not only in tests:**
+    - the Prometheus target is `up` with the scrape account
+    - all ten rules loaded
+    - queries return the application series
+    - Grafana's datasource health check passes, and the dashboard is provisioned
+      under its folder
+    - a request log line reads `tenant=acme requestId=...`
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -749,6 +852,9 @@ GET            /api/platform/tenants/{id}/audit-events
 POST          /api/platform/tenants/{id}/deactivate
 POST          /api/platform/tenants/{id}/activate
 GET  /api/health                       (public)
+GET  /actuator/health, /actuator/health/liveness, /actuator/health/readiness   (public)
+GET  /actuator/prometheus              (scrape account only, HTTP Basic)
+GET  /actuator/info                    (PLATFORM_ADMIN)
 POST GET      /api/products
 GET            /api/products/{code}
 POST GET      /api/plans
@@ -987,9 +1093,11 @@ feature module does.
   querying only rows whose `next_attempt_at` is due. The set is bounded (an
   invoice is eventually paid or written off) and the check is cheap, but a
   tenant with many uncollected invoices does more work per tick than it needs to.
-- **No metrics.** How many invoices are in dunning, how many recover, and at which
-  attempt, are exactly the numbers a billing team would ask for first, and there
-  is nowhere to read them but the database. Waiting on the observability line.
+- ~~No metrics~~ — closed by Observability: `dunning.attempts.started`,
+  `dunning.recoveries{attempts}`, and `audit.events` for `SUBSCRIPTION_PAST_DUE`,
+  `SUBSCRIPTION_RECOVERED` and `INVOICE_UNCOLLECTIBLE`. Still missing: how many
+  invoices are *currently* in dunning, which needs a gauge over `dunning_state`,
+  and that would be one more cross-tenant query.
 
 **Notifications**
 
@@ -1056,10 +1164,9 @@ feature module does.
   `customer` — "read *your own* subscriptions" — and no schema exists for that
   link. Declared because CLAUDE.md §7 named it, not because it does anything.
 - ~~No platform-level (cross-tenant) principal~~ — closed by Tenant provisioning
-  (see Current state). **Who may read metrics is still undecided**: `/actuator/**`
-  accepts either kind of token, and non-health endpoints stay unexposed until
-  Observability restricts `/actuator/prometheus` to the platform principal or a
-  dedicated scrape credential.
+  (see Current state). ~~Who may read metrics is still undecided~~ — decided by
+  Observability: a dedicated scrape account for `/actuator/prometheus`, and
+  `PLATFORM_ADMIN` for the rest of `/actuator/**`.
 - ~~No way to create a tenant~~ — closed by Tenant provisioning. Four options were
   weighed: self-service signup, a platform-admin API, out-of-band tooling, and a
   payment-provider webhook. A B2B billing backend points at the platform-admin API,
@@ -1090,7 +1197,10 @@ feature module does.
   lifecycle), but the day deletion exists, the one record of what happened goes
   with it. Retention also stays unbounded.
 - **Failed logins and authorization denials are not recorded**, deliberately:
-  they belong to Observability, as a metric and an alert on a spike.
+  they belong to metrics. Failed logins are now `auth.login.failures{principal}`
+  with a `LoginFailureSpike` alert. Denials have no dedicated meter; they show only
+  as 401/403 in `http_server_requests`, which Boot's observation filter records
+  ahead of the security chain.
 - ~~Two concurrent deactivations can both record~~ — closed by a conditional
   UPDATE that reports whether it changed the row (see Current state's Customer
   updates for why not `@Version`). Every caller still gets 200, and exactly one
@@ -1137,6 +1247,41 @@ feature module does.
     cannot be used to map which endpoints exist.
   - **Still unmapped:** anything else Spring MVC raises before dispatch, e.g. 406
     for an `Accept` header nothing can produce. Nothing here exercises it.
+
+**Observability**
+
+- **No tracing.** The `requestId` correlates log lines within one process, but
+  nothing follows a notification across the SQS hop, or a Stripe payment from the
+  API call to its webhook. Micrometer Tracing with OTel is the next step if that
+  matters, and the queue hop is where it would earn its keep.
+- **No Alertmanager.** Rules evaluate and show as firing at
+  `localhost:9090/alerts`, but nothing notifies anyone.
+- **A job that has never run has no staleness series.** `jobs.last.success` is
+  registered on the first successful run, so for up to an hour after a restart
+  (the hourly jobs) the staleness alerts cannot fire, and a job that never runs
+  after startup is invisible. An `absent()` rule would cover it, at the cost of a
+  false alarm on every restart.
+- **Counters reset on restart and are per instance.** Fine for rates and
+  `increase()`, which handle resets, but not a ledger. The database is the record
+  of how many invoices exist; the metrics say how fast things are happening.
+- **The outbox gauge runs two aggregate queries per scrape, and neither has an
+  index built for it.** `idx_notification_tenant_status_created` leads with
+  `tenant_id`, and these queries filter only on status, so Postgres cannot seek on
+  it (not checked with `EXPLAIN`). That is fine at this size and grows with the
+  table, since sent rows are never deleted. A partial index on `created_at WHERE
+  status IN ('PENDING','PUBLISHED')` stays small, because it only ever holds rows
+  still waiting. A scrape during a database outage reports NaN rather than a stale
+  value.
+- **Nothing tests the dashboard JSON or the alert expressions.** The metric names
+  they query are asserted by `BusinessMetricsIntegrationTest`, and both were
+  checked against a live Prometheus once, but a PromQL typo in a panel would only
+  show as an empty graph. `promtool check rules` in CI is the cheap fix.
+- **Local credentials are defaults.** Grafana is `admin`/`admin` and the scrape
+  password is `.env.example`'s, which is fine on a laptop and must change anywhere
+  reachable.
+- **No per-tenant view of anything in Prometheus**, by design (cardinality).
+  Questions like "which tenant's payments are failing" go to the logs or the
+  database.
 
 **Tenant provisioning**
 
