@@ -12,14 +12,18 @@ import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionRepository;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
 import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 @Service
 public class SubscriptionService {
@@ -82,42 +86,74 @@ public class SubscriptionService {
 
     @Transactional
     public SubscriptionEntity cancel(UUID id) {
-        SubscriptionEntity subscription = findOwned(id);
-        if (subscription.getStatus() == SubscriptionStatus.CANCELED) {
-            throw new InvalidSubscriptionStateException("cancel", subscription.getStatus());
-        }
-        SubscriptionStatus from = subscription.getStatus();
-        subscription.setStatus(SubscriptionStatus.CANCELED);
-        subscription.setCanceledAt(Instant.now());
-        SubscriptionEntity saved = subscriptions.save(subscription);
-        audit.record(AuditEventType.SUBSCRIPTION_CANCELED, saved.getId(), Map.of("from", from));
-        return saved;
+        return transition(id, "cancel", CANCELABLE, from -> {
+            if (!subscriptions.cancelIfStatus(TenantContext.getTenantId(), id, from, Instant.now())) {
+                return false;
+            }
+            audit.record(AuditEventType.SUBSCRIPTION_CANCELED, id, Map.of("from", from));
+            return true;
+        });
     }
 
     @Transactional
     public SubscriptionEntity pause(UUID id) {
-        SubscriptionEntity subscription = findOwned(id);
-        if (subscription.getStatus() != SubscriptionStatus.ACTIVE
-                && subscription.getStatus() != SubscriptionStatus.TRIALING) {
-            throw new InvalidSubscriptionStateException("pause", subscription.getStatus());
-        }
-        SubscriptionStatus from = subscription.getStatus();
-        subscription.setStatus(SubscriptionStatus.PAUSED);
-        SubscriptionEntity saved = subscriptions.save(subscription);
-        audit.record(AuditEventType.SUBSCRIPTION_PAUSED, saved.getId(), Map.of("from", from));
-        return saved;
+        return transition(id, "pause", PAUSABLE, from -> {
+            if (!subscriptions.updateStatusIfStatus(TenantContext.getTenantId(), id, from, SubscriptionStatus.PAUSED)) {
+                return false;
+            }
+            audit.record(AuditEventType.SUBSCRIPTION_PAUSED, id, Map.of("from", from));
+            return true;
+        });
     }
 
     @Transactional
     public SubscriptionEntity resume(UUID id) {
+        return transition(id, "resume", RESUMABLE, from -> {
+            if (!subscriptions.updateStatusIfStatus(TenantContext.getTenantId(), id, from, SubscriptionStatus.ACTIVE)) {
+                return false;
+            }
+            audit.record(AuditEventType.SUBSCRIPTION_RESUMED, id, Map.of());
+            return true;
+        });
+    }
+
+    private static final Set<SubscriptionStatus> CANCELABLE = EnumSet.complementOf(EnumSet.of(SubscriptionStatus.CANCELED));
+    private static final Set<SubscriptionStatus> PAUSABLE = EnumSet.of(SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING);
+    private static final Set<SubscriptionStatus> RESUMABLE = EnumSet.of(SubscriptionStatus.PAUSED);
+    private static final int MAX_TRANSITION_ATTEMPTS = 3;
+
+    /**
+     * A state command as a compare-and-set: check the transition is allowed from
+     * the status just read, then apply it only if the row still has that status.
+     *
+     * When the conditional update misses, something else changed the
+     * subscription in between - dunning marking it PAST_DUE, a job renewing it,
+     * another request. The status is re-read from the database and the decision
+     * is made again against it: a cancel that lost to PAST_DUE still cancels, a
+     * pause that lost to a cancellation is refused as INVALID_SUBSCRIPTION_STATE.
+     * Nothing is ever written over a status this request did not see, which is
+     * what the old load-modify-save could not promise.
+     *
+     * The loop is bounded because every retry means another writer committed; a
+     * subscription changing three times within one request is not a case worth
+     * waiting out, so the caller gets 409 CONCURRENT_MODIFICATION and re-sends.
+     */
+    private SubscriptionEntity transition(UUID id, String action, Set<SubscriptionStatus> allowedFrom,
+                                          Predicate<SubscriptionStatus> applyFrom) {
+        String tenantId = TenantContext.getTenantId();
         SubscriptionEntity subscription = findOwned(id);
-        if (subscription.getStatus() != SubscriptionStatus.PAUSED) {
-            throw new InvalidSubscriptionStateException("resume", subscription.getStatus());
+        for (int attempt = 0; attempt < MAX_TRANSITION_ATTEMPTS; attempt++) {
+            SubscriptionStatus from = subscription.getStatus();
+            if (!allowedFrom.contains(from)) {
+                throw new InvalidSubscriptionStateException(action, from);
+            }
+            if (applyFrom.test(from)) {
+                return subscription;
+            }
+            subscription = subscriptions.findCurrentByTenantIdAndId(tenantId, id)
+                    .orElseThrow(() -> new ResourceNotFoundException("Subscription", id.toString()));
         }
-        subscription.setStatus(SubscriptionStatus.ACTIVE);
-        SubscriptionEntity saved = subscriptions.save(subscription);
-        audit.record(AuditEventType.SUBSCRIPTION_RESUMED, saved.getId(), Map.of());
-        return saved;
+        throw new OptimisticLockingFailureException("Subscription " + id + " kept changing while trying to " + action + " it");
     }
 
     public SubscriptionEntity getById(UUID id) {

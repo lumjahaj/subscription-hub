@@ -17,7 +17,7 @@ import java.util.Optional;
 /**
  * Pure — no repository, no clock, no Spring. Mirrors the split
  * SubscriptionRenewalService uses between load/save and its pure
- * applyRenewal rule, so the money arithmetic is unit-testable without a
+ * renewalFor rule, so the money arithmetic is unit-testable without a
  * database.
  */
 final class InvoiceCalculator {

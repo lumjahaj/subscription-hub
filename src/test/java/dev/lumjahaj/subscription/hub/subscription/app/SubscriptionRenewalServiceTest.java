@@ -2,6 +2,7 @@ package dev.lumjahaj.subscription.hub.subscription.app;
 
 import dev.lumjahaj.subscription.hub.catalog.domain.IntervalUnit;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
+import dev.lumjahaj.subscription.hub.subscription.app.SubscriptionRenewalService.Renewal;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
 import org.junit.jupiter.api.Test;
@@ -28,98 +29,96 @@ class SubscriptionRenewalServiceTest {
     }
 
     @Test
-    void applyRenewal_movesTrialingToActiveWhenDue() {
-        SubscriptionEntity sub = subscription(
-                SubscriptionStatus.TRIALING,
-                Instant.parse("2026-02-14T00:00:00Z"),
-                Instant.parse("2026-02-14T00:00:00Z"));
+    void renewalFor_movesTrialingIntoAPaidPeriodWhenDue() {
+        Instant trialEnd = Instant.parse("2026-02-14T00:00:00Z");
+        SubscriptionEntity sub = subscription(SubscriptionStatus.TRIALING, trialEnd, trialEnd);
 
-        boolean changed = SubscriptionRenewalService.applyRenewal(sub, NOW);
-
-        assertThat(changed).isTrue();
-        assertThat(sub.getStatus()).isEqualTo(SubscriptionStatus.ACTIVE);
+        // Becoming ACTIVE is part of every renewal; renewIfCurrent writes it.
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW))
+                .contains(new Renewal(trialEnd, Instant.parse("2026-03-14T00:00:00Z")));
     }
 
     @Test
-    void applyRenewal_rollsPeriodForwardWhenActiveAndDue() {
+    void renewalFor_rollsPeriodForwardWhenActiveAndDue() {
         Instant oldEnd = Instant.parse("2026-02-14T00:00:00Z");
         SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, oldEnd, oldEnd);
 
-        boolean changed = SubscriptionRenewalService.applyRenewal(sub, NOW);
-
-        assertThat(changed).isTrue();
-        assertThat(sub.getStatus()).isEqualTo(SubscriptionStatus.ACTIVE);
-        assertThat(sub.getCurrentPeriodEnd()).isEqualTo(Instant.parse("2026-03-14T00:00:00Z"));
-        assertThat(sub.getNextRenewal()).isEqualTo(sub.getCurrentPeriodEnd());
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW))
+                .contains(new Renewal(oldEnd, Instant.parse("2026-03-14T00:00:00Z")));
     }
 
     @Test
-    void applyRenewal_anchorsNewPeriodStartToOldPeriodEndNotNow() {
+    void renewalFor_anchorsNewPeriodStartToOldPeriodEndNotNow() {
         // "now" is deliberately well past the due date, simulating job lag -
         // the new period must not drift to be anchored on "now".
         Instant oldEnd = Instant.parse("2026-02-01T00:00:00Z");
         SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, oldEnd, oldEnd);
 
-        SubscriptionRenewalService.applyRenewal(sub, NOW);
-
-        assertThat(sub.getCurrentPeriodStart()).isEqualTo(oldEnd);
-        assertThat(sub.getCurrentPeriodEnd()).isEqualTo(Instant.parse("2026-03-01T00:00:00Z"));
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW))
+                .contains(new Renewal(oldEnd, Instant.parse("2026-03-01T00:00:00Z")));
     }
 
     @Test
-    void applyRenewal_advancesExactlyOnePeriodEvenWhenSeverelyOverdue() {
+    void renewalFor_advancesExactlyOnePeriodEvenWhenSeverelyOverdue() {
         // Six months overdue - only one interval should be applied; the
         // result staying in the past is expected, it'll be picked up again
         // on the next run.
         Instant longOverdueEnd = Instant.parse("2025-08-15T00:00:00Z");
         SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, longOverdueEnd, longOverdueEnd);
 
-        SubscriptionRenewalService.applyRenewal(sub, NOW);
-
-        assertThat(sub.getCurrentPeriodEnd()).isEqualTo(Instant.parse("2025-09-15T00:00:00Z"));
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW))
+                .map(Renewal::periodEnd)
+                .contains(Instant.parse("2025-09-15T00:00:00Z"));
     }
 
     @Test
-    void applyRenewal_rollsByThePlansIntervalCountForQuarterlyBilling() {
+    void renewalFor_rollsByThePlansIntervalCountForQuarterlyBilling() {
         Instant oldEnd = Instant.parse("2026-02-14T00:00:00Z");
         SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, oldEnd, oldEnd);
         sub.getPlan().setIntervalCount(3);
 
-        SubscriptionRenewalService.applyRenewal(sub, NOW);
-
-        assertThat(sub.getCurrentPeriodEnd()).isEqualTo(Instant.parse("2026-05-14T00:00:00Z"));
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW))
+                .map(Renewal::periodEnd)
+                .contains(Instant.parse("2026-05-14T00:00:00Z"));
     }
 
     @Test
-    void applyRenewal_doesNothingWhenNotYetDue() {
+    void renewalFor_isEmptyWhenNotYetDue() {
         Instant futureEnd = Instant.parse("2026-03-01T00:00:00Z");
         SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, futureEnd, futureEnd);
 
-        boolean changed = SubscriptionRenewalService.applyRenewal(sub, NOW);
-
-        assertThat(changed).isFalse();
-        assertThat(sub.getCurrentPeriodEnd()).isEqualTo(futureEnd);
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW)).isEmpty();
     }
 
     @Test
-    void applyRenewal_doesNothingWhenPaused() {
+    void renewalFor_isEmptyWhenPaused() {
         Instant pastEnd = Instant.parse("2026-02-01T00:00:00Z");
         SubscriptionEntity sub = subscription(SubscriptionStatus.PAUSED, pastEnd, pastEnd);
 
-        boolean changed = SubscriptionRenewalService.applyRenewal(sub, NOW);
-
-        assertThat(changed).isFalse();
-        assertThat(sub.getStatus()).isEqualTo(SubscriptionStatus.PAUSED);
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW)).isEmpty();
     }
 
     @Test
-    void applyRenewal_doesNothingWhenCanceled() {
+    void renewalFor_isEmptyWhenCanceled() {
         Instant pastEnd = Instant.parse("2026-02-01T00:00:00Z");
         SubscriptionEntity sub = subscription(SubscriptionStatus.CANCELED, pastEnd, pastEnd);
 
-        boolean changed = SubscriptionRenewalService.applyRenewal(sub, NOW);
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW)).isEmpty();
+    }
 
-        assertThat(changed).isFalse();
-        assertThat(sub.getStatus()).isEqualTo(SubscriptionStatus.CANCELED);
+    @Test
+    void renewalFor_neverModifiesTheSubscription() {
+        // A modified managed entity is written at commit, unconditionally -
+        // which is exactly how a renewal used to overwrite a concurrent cancel.
+        Instant oldEnd = Instant.parse("2026-02-14T00:00:00Z");
+        SubscriptionEntity sub = subscription(SubscriptionStatus.TRIALING, oldEnd, oldEnd);
+        Instant oldStart = sub.getCurrentPeriodStart();
+
+        SubscriptionRenewalService.renewalFor(sub, NOW);
+
+        assertThat(sub.getStatus()).isEqualTo(SubscriptionStatus.TRIALING);
+        assertThat(sub.getCurrentPeriodStart()).isEqualTo(oldStart);
+        assertThat(sub.getCurrentPeriodEnd()).isEqualTo(oldEnd);
+        assertThat(sub.getNextRenewal()).isEqualTo(oldEnd);
     }
 }

@@ -11,7 +11,7 @@ import java.util.List;
  * When to try again, and when to stop trying.
  *
  * Pure: no repository, no clock, no Spring beyond reading its own
- * configuration — the same split SubscriptionRenewalService.applyRenewal
+ * configuration — the same split SubscriptionRenewalService.renewalFor
  * and InvoiceCalculator use, so the policy can be tested as a table of
  * inputs and outputs rather than through a job and a database.
  *

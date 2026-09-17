@@ -20,13 +20,17 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * The dunning rules: what a failed or successful collection means for the
@@ -42,6 +46,7 @@ import java.util.UUID;
 public class DunningService implements PaymentOutcomeListener {
 
     private static final Logger log = LoggerFactory.getLogger(DunningService.class);
+    private static final int MAX_TRANSITION_ATTEMPTS = 3;
 
     private final DunningStateRepository dunningStates;
     private final InvoiceRepository invoices;
@@ -103,14 +108,17 @@ public class DunningService implements PaymentOutcomeListener {
 
         invoices.findByTenantIdAndId(tenantId, invoiceId).ifPresent(invoice -> {
             SubscriptionEntity subscription = invoice.getSubscription();
-            if (subscription.getStatus() == SubscriptionStatus.PAST_DUE) {
-                subscription.setStatus(SubscriptionStatus.ACTIVE);
-                subscriptions.save(subscription);
-                audit.recordSystem(AuditEventType.SUBSCRIPTION_RECOVERED, subscription.getId(),
-                        Map.of("invoiceId", invoiceId));
-                log.info("Subscription {} recovered from PAST_DUE after invoice {} was paid",
-                        subscription.getId(), invoice.getNumber());
-            }
+            // Only PAST_DUE recovers. A customer who canceled while this
+            // payment was settling stays canceled: the old load-modify-save
+            // would have written ACTIVE over that cancellation.
+            transitionSubscription(tenantId, subscription, EnumSet.of(SubscriptionStatus.PAST_DUE),
+                    from -> subscriptions.updateStatusIfStatus(tenantId, subscription.getId(), from, SubscriptionStatus.ACTIVE))
+                    .ifPresent(from -> {
+                        audit.recordSystem(AuditEventType.SUBSCRIPTION_RECOVERED, subscription.getId(),
+                                Map.of("invoiceId", invoiceId));
+                        log.info("Subscription {} recovered from PAST_DUE after invoice {} was paid",
+                                subscription.getId(), invoice.getNumber());
+                    });
         });
     }
 
@@ -233,20 +241,52 @@ public class DunningService implements PaymentOutcomeListener {
     }
 
     private void markPastDue(InvoiceEntity invoice) {
+        String tenantId = invoice.getTenantId();
         SubscriptionEntity subscription = invoice.getSubscription();
-        SubscriptionStatus status = subscription.getStatus();
         // CANCELED stays canceled, and PAUSED is a deliberate customer
-        // choice that non-payment shouldn't quietly overwrite.
-        if (status != SubscriptionStatus.ACTIVE && status != SubscriptionStatus.TRIALING) {
-            return;
+        // choice that non-payment shouldn't quietly overwrite - including a
+        // pause that commits while this failure is being settled.
+        transitionSubscription(tenantId, subscription, EnumSet.of(SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING),
+                from -> subscriptions.updateStatusIfStatus(tenantId, subscription.getId(), from, SubscriptionStatus.PAST_DUE))
+                .ifPresent(from -> {
+                    audit.recordSystem(AuditEventType.SUBSCRIPTION_PAST_DUE, subscription.getId(), Map.of(
+                            "from", from,
+                            "invoiceId", invoice.getId()));
+                    log.info("Subscription {} is PAST_DUE after a failed payment for invoice {}",
+                            subscription.getId(), invoice.getNumber());
+                });
+    }
+
+    /**
+     * Applies a status change to a subscription only from a status it still
+     * has, returning the status it changed from, or empty when the current
+     * status does not allow the change. The same compare-and-set loop as
+     * SubscriptionService.transition, for the transitions dunning makes.
+     *
+     * This runs inside settlement's transaction, so it must not fail on a race
+     * it can resolve: a miss re-reads the subscription and decides again, which
+     * turns "someone paused it meanwhile" into a correct no-op instead of an
+     * exception that would roll back a payment that really happened.
+     */
+    private Optional<SubscriptionStatus> transitionSubscription(
+            String tenantId, SubscriptionEntity subscription, Set<SubscriptionStatus> allowedFrom,
+            Predicate<SubscriptionStatus> applyFrom) {
+        SubscriptionEntity current = subscription;
+        for (int attempt = 0; attempt < MAX_TRANSITION_ATTEMPTS; attempt++) {
+            SubscriptionStatus from = current.getStatus();
+            if (!allowedFrom.contains(from)) {
+                return Optional.empty();
+            }
+            if (applyFrom.test(from)) {
+                return Optional.of(from);
+            }
+            current = subscriptions.findCurrentByTenantIdAndId(tenantId, subscription.getId())
+                    .orElseThrow(() -> new IllegalStateException("Subscription " + subscription.getId() + " disappeared"));
         }
-        subscription.setStatus(SubscriptionStatus.PAST_DUE);
-        subscriptions.save(subscription);
-        audit.recordSystem(AuditEventType.SUBSCRIPTION_PAST_DUE, subscription.getId(), Map.of(
-                "from", status,
-                "invoiceId", invoice.getId()));
-        log.info("Subscription {} is PAST_DUE after a failed payment for invoice {}",
-                subscription.getId(), invoice.getNumber());
+        // Three writers committing in the width of one settlement. A retried
+        // webhook settles it; not a case worth more code than this.
+        throw new OptimisticLockingFailureException(
+                "Subscription " + subscription.getId() + " kept changing during dunning");
     }
 
     private void giveUp(InvoiceEntity invoice, DunningStateEntity state, String failureCode) {
@@ -257,18 +297,16 @@ public class DunningService implements PaymentOutcomeListener {
                 "attempts", state.getAttemptCount()));
 
         SubscriptionEntity subscription = invoice.getSubscription();
-        if (subscription.getStatus() != SubscriptionStatus.CANCELED) {
-            SubscriptionStatus from = subscription.getStatus();
-            subscription.setStatus(SubscriptionStatus.CANCELED);
-            subscription.setCanceledAt(Instant.now());
-            subscriptions.save(subscription);
-            // The same event type as an admin's cancellation; the actor and
-            // the reason are what tell the two apart.
-            audit.recordSystem(AuditEventType.SUBSCRIPTION_CANCELED, subscription.getId(), Map.of(
-                    "from", from,
-                    "reason", "DUNNING_EXHAUSTED",
-                    "invoiceId", invoice.getId()));
-        }
+        String tenantId = invoice.getTenantId();
+        transitionSubscription(tenantId, subscription, EnumSet.complementOf(EnumSet.of(SubscriptionStatus.CANCELED)),
+                from -> subscriptions.cancelIfStatus(tenantId, subscription.getId(), from, Instant.now()))
+                .ifPresent(from ->
+                        // The same event type as an admin's cancellation; the
+                        // actor and the reason are what tell the two apart.
+                        audit.recordSystem(AuditEventType.SUBSCRIPTION_CANCELED, subscription.getId(), Map.of(
+                                "from", from,
+                                "reason", "DUNNING_EXHAUSTED",
+                                "invoiceId", invoice.getId())));
 
         // The schedule has served its purpose; the invoice's status and its
         // failed payments are the lasting record.

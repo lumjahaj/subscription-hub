@@ -35,7 +35,7 @@ import java.util.UUID;
  * Reuses the existing "due for renewal" query unchanged rather than
  * adding a new finder: nextRenewal == currentPeriodEnd at every write
  * site (SubscriptionService.create, both branches, and
- * SubscriptionRenewalService.applyRenewal), so a subscription this query
+ * SubscriptionJpaRepository.renewIfCurrent), so a subscription this query
  * selects always has a closed current period, which is exactly what
  * InvoiceService.generateForCurrentPeriod needs to succeed. If those two
  * ever diverge, billing will need its own finder.

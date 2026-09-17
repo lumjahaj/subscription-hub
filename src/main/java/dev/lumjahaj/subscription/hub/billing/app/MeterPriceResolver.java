@@ -59,7 +59,7 @@ public class MeterPriceResolver {
     /**
      * Package-private and static so the parsing rule is unit-testable
      * without Spring - the same split SubscriptionRenewalService uses
-     * between load/save and the pure applyRenewal rule.
+     * between load/save and the pure renewalFor rule.
      */
     static Optional<MeterPrice> parse(JsonNode node) {
         JsonNode unitAmount = node.path("unitAmountCents");
