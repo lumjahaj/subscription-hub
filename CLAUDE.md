@@ -338,6 +338,14 @@ contract. Nested per-parent collections (`/api/plans/{planCode}/entitlements`,
   conditional `UPDATE ... WHERE <state differs>` and act on the row count, not
   `@Version`: a caller whose intent is already satisfied gets the no-op, not a
   conflict.
+- **Subscriptions change only through compare-and-set.** Every subscription change
+  is a state command (cancel, pause, resume, past due, recover, renew), and it goes
+  through `SubscriptionRepository`'s `updateStatusIfStatus`, `cancelIfStatus` or
+  `renewIfCurrent`: one UPDATE that applies only if the row still has the status
+  (and, for renewal, the period) the caller read. On a miss, re-read with
+  `findCurrentByTenantIdAndId` and decide again. Never set a field on a loaded
+  `SubscriptionEntity` and save it: a dirty managed entity is written at commit
+  unconditionally, over whatever committed in between.
 
 **Money** — always integer minor units (`amountCents`, `long`). Never floating
 point.
@@ -471,7 +479,7 @@ subscription-hub-state skill.
   renewal; any other failure leaves the subscription due. Never split the two
   onto separate schedules.
 - **`nextRenewal == currentPeriodEnd` at every write site** (`SubscriptionService`
-  create, both branches; `SubscriptionRenewalService.applyRenewal`). The job reuses
+  create, both branches; `SubscriptionJpaRepository.renewIfCurrent`). The job reuses
   the renewal finder on the strength of it. If a change makes them diverge,
   billing needs its own finder.
 - **PDF generation stays out of the billing transaction.** No remote call inside
@@ -517,8 +525,13 @@ unattended ones.
   crash costs one retry rather than leaving the invoice due again immediately —
   which on an hourly cron means charging the customer every hour. The
   idempotency key is `dunning:{invoiceId}:{attempt}`, so a repeat resumes.
-- **`PAUSED` and `CANCELED` are never dragged to `PAST_DUE`.** Pausing is a
-  deliberate customer choice; non-payment must not silently overwrite it.
+- **`PAUSED` and `CANCELED` are never dragged to `PAST_DUE`**, including by a
+  pause or cancel that commits while a failure is settling. Pausing is a deliberate
+  customer choice; non-payment must not silently overwrite it. Likewise a recovery
+  never reactivates a subscription canceled meanwhile, and a renewal never
+  reinstates one. All three hold because dunning and renewal change subscriptions
+  by compare-and-set (see Updates in §5), which `SubscriptionTransitionRaceIntegrationTest`
+  forces race by race.
 - **Dunning ends.** After `dunning.max-attempts` the invoice is `UNCOLLECTIBLE`
   and the subscription `CANCELED`: each attempt costs a provider fee and annoys
   the customer's bank, so retrying forever is not a kindness.
@@ -731,11 +744,15 @@ subscription-hub-state skill's Known gaps):
 3. ~~**Observability**~~ Done: `/actuator/prometheus` behind a dedicated scrape
    account, job/business/outbox/login metrics, liveness and readiness probes, and
    Prometheus + Grafana in Compose with alert rules and a provisioned dashboard.
-4. ~~**`spring.jpa.open-in-view` off**~~ Done (4a): explicit fetch plans for every
-   response that reads an association, then the flag.
-   Still to come (4b): `@Version` on `subscription`. Its non-request writers need
-   a retry-or-skip policy first, above all the fake gateway: its settlement is
-   synchronous, so a version conflict would leave a payment `PENDING`.
+4. ~~**`spring.jpa.open-in-view` off, and subscription lost updates**~~ Done.
+   4a: explicit fetch plans for every response that reads an association, then the
+   flag. 4b: subscription changes became compare-and-set conditional updates
+   instead of the planned `@Version`. Every writer is a state command, and
+   `@Version` would only have detected conflicts, needing retry logic in five
+   places, including inside synchronous fake-gateway settlement.
+
+The re-sequenced roadmap is complete. Deployment (managed free tiers) was parked as
+an undecided idea to revisit now.
 
 - **Audit events moved after authentication**, and had to. The point of an
   audit log is recording *who* did something, and building it before there was

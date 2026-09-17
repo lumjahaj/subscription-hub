@@ -138,7 +138,7 @@ description: What is built in Subscription Hub, why each decision was made, and 
     pricing. This is the table's first real use beyond being stored and
     echoed back.
   - `InvoiceCalculator` (pure, package-private, mirrors
-    `SubscriptionRenewalService.applyRenewal`'s split from load/save) rounds
+    `SubscriptionRenewalService.renewalFor`'s split from load/save) rounds
     the `BigDecimal` quantity × `long unitAmountCents` product `HALF_UP` to
     whole cents, exactly once per line — `total_cents` is the sum of
     already-rounded line amounts, never a separately rounded total, so the
@@ -172,7 +172,7 @@ description: What is built in Subscription Hub, why each decision was made, and 
   - **`BillingCycleJob`** replaces `RenewalJob` (cron property renamed
     `subscription.renewal.cron` → `billing.cycle.cron`). Invoicing and
     renewal are two steps of one process, not two independent jobs: once
-    `SubscriptionRenewalService.applyRenewal` advances a subscription, the
+    a renewal advances a subscription, the
     closed period's start is gone from the row, so running the two on
     separate crons races and the losing side is unbilled revenue.
     `BillingCycleJob` invoices then renews, per subscription, reusing the
@@ -392,7 +392,7 @@ description: What is built in Subscription Hub, why each decision was made, and 
     reject the attempt anyway), and a customer with no stored payment method
     (left `OPEN` for a human rather than invented behaviour — see the gaps below).
   - `DunningSchedule` is pure and unit-tested as a table of attempt → delay, the
-    same split `applyRenewal` and `InvoiceCalculator` use. Defaults: retries after
+    same split `renewalFor` and `InvoiceCalculator` use. Defaults: retries after
     1d, 3d, 5d, four attempts total.
   - Verified live as well as in tests: with the cron shortened, a declining card
     produced `PAST_DUE` on the first run, no attempt on the second (the schedule
@@ -656,6 +656,65 @@ description: What is built in Subscription Hub, why each decision was made, and 
     `AUDIT_FILTER_INCOMPLETE`: silently returning the whole timeline would look
     like one record's history. A tenant's admins see what the platform did to
     their tenant as well.
+- **Subscription transitions as compare-and-set** (roadmap step 4b). Every write
+  to a subscription after creation used to be load, set a field, save. A read-then-
+  write loses to a concurrent writer, and a subscription has more of those than
+  anything else: requests, `BillingCycleJob`, and dunning inside payment settlement.
+  Reading the writers turned up four lost updates in shipped code:
+
+  | Concurrent writes | What happened |
+  |---|---|
+  | Customer pauses while settlement marks `PAST_DUE` | The pause was overwritten |
+  | Customer cancels while `BillingCycleJob` renews | `applyRenewal` set `status = ACTIVE`, **undoing the cancellation** and billing on |
+  | Customer cancels while a recovery settles | `onPaymentSucceeded` read `PAST_DUE`, wrote `ACTIVE`: **a canceled subscription reactivated** |
+  | A request transitions from a status that just changed | Applied from the stale status, with a wrong `from` in the audit event |
+
+  - **Not `@Version`, which was the plan.** Every one of these writers is a state
+    command, and CLAUDE.md §5 already says state commands use conditional updates.
+    `@Version` would only have detected each conflict, leaving five callers to
+    re-read and re-decide. The worst of them was inside `FakePaymentGateway`'s
+    synchronous settlement: a version exception there rolls back the payment. A
+    dunning payment then stays `PENDING` with no provider reference, and
+    `hasPaymentInFlight` skips that invoice forever.
+  - **Compare-and-set on the exact observed status**, not on the set of allowed
+    statuses. `updateStatusIfStatus`, `cancelIfStatus` and `renewIfCurrent` are
+    JPQL bulk updates with `WHERE status = :expected`; renewal also matches
+    `current_period_end = :expectedPeriodEnd`. With `IN (allowed)`, a cancel that
+    raced dunning would have succeeded, but recorded `from: ACTIVE` for a row that
+    was `PAST_DUE`.
+  - **A miss re-reads and decides again**, up to three times. The re-read uses
+    `findCurrentByTenantIdAndId`, which refreshes the entity: a plain find returns
+    the stale persistence-context instance.
+    - **Requests:** a cancel that lost to `PAST_DUE` still cancels. A pause that
+      lost to a cancellation is 409 `INVALID_SUBSCRIPTION_STATE`. Three misses in a
+      row is 409 `CONCURRENT_MODIFICATION`.
+    - **Dunning:** a status that no longer allows the change is a correct no-op, not
+      an exception, because this runs inside settlement's transaction and must not
+      roll back money that moved.
+    - **Renewal:** a miss simply returns false; the next run decides from the new
+      state.
+  - **Renewal became a pure calculation.** `renewalFor(subscription, now)` returns
+    the next period and no longer modifies the entity. A modified managed entity is
+    written at commit whether or not the conditional update applied, which would
+    have reintroduced the bug through the back door. `SubscriptionRenewalServiceTest`
+    pins that it never modifies its input.
+  - **No `clearAutomatically`**, unlike `TenantJpaRepository`. These updates run
+    inside dunning's settlement transaction, and clearing the persistence context
+    there would detach the invoice and payment still in use. The adapter instead
+    refreshes just the updated subscription, and `flushAutomatically` writes the
+    caller's pending changes first.
+  - **Proven by forcing each race**, not by threads hoping to collide.
+    `SubscriptionTransitionRaceIntegrationTest` runs each scenario the same way:
+    1. A transaction reads the subscription.
+    2. Another connection commits the competing change.
+    3. The real service method runs in the now-stale transaction.
+
+    It covers renewal vs cancel, past-due vs pause, recovery vs cancel, a refused
+    request, and a request that applies from the new status and records the real
+    `from`. Not shown: these tests failing against the old code. They call
+    repository methods that did not exist before, so the old failures are argued
+    from the code, not demonstrated.
+  - **No schema change.**
 - **Customer updates and optimistic locking** — `PUT /api/customers/{id}`, the
   first update endpoint in the codebase, plus V17 (`customer.version`). Closes
   the update half of "no update or delete anywhere", and the
@@ -1085,16 +1144,9 @@ feature module does.
 
 **Dunning**
 
-- **A concurrent pause can be overwritten with `PAST_DUE`.** `DunningService`
-  reads the subscription's status, checks it is not `PAUSED` or `CANCELED`, then
-  sets `PAST_DUE`, with no lock and no `@Version`. A pause that commits between
-  that read and the write is silently lost, which breaks the "PAUSED is never
-  dragged to PAST_DUE" invariant under concurrency. Rare, since it needs a
-  customer's pause to land during a failed payment's settlement. The fix is
-  `@Version` on `subscription` (CLAUDE.md §7 roadmap step 4). The catch is that its writers are
-  dunning and settlement, not a request, and a lock failure would roll back
-  settlement. With the fake gateway that runs inside the paying request, so
-  those callers need a retry-or-skip policy first.
+- ~~A concurrent pause can be overwritten with `PAST_DUE`~~ — closed, along with
+  three siblings found while fixing it. See Current state's "Subscription
+  transitions as compare-and-set".
 - **A customer with no stored payment method is never chased, and now never
   emailed either.** Their invoices stay `OPEN` forever, no dunning row is
   created, and `DunningService.startAttempt` returns before a notification
