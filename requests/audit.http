@@ -1,0 +1,190 @@
+### Auth: log in as acme's seeded admin. Reading the audit log is ADMIN only.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "admin@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("acmeToken", response.body.token);
+%}
+
+### Auth: acme's seeded SUPPORT user, for the 403 check below.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "acme",
+  "email": "support@acme.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("supportToken", response.body.token);
+%}
+
+### Auth: a second tenant, for the isolation check.
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "tenantId": "demo",
+  "email": "admin@demo.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("demoToken", response.body.token);
+%}
+
+### Auth: the platform administrator.
+POST {{baseUrl}}/api/platform/auth/token
+Content-Type: application/json
+
+{
+  "email": "platform@subscriptionhub.test",
+  "password": "subscriptionhub"
+}
+
+> {%
+    client.global.set("platformToken", response.body.token);
+%}
+
+
+### Setup: something to audit. Codes and email embed a timestamp so the file can be re-run.
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "code": "audit-product-{{$timestamp}}",
+  "name": "Audit Product"
+}
+
+> {%
+    client.global.set("auditProductCode", response.body.code);
+%}
+
+### Setup: plan (records PLAN_CREATED with the price in data)
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "productCode": "{{auditProductCode}}",
+  "code": "audit-plan-{{$timestamp}}",
+  "name": "Audit Plan",
+  "intervalUnit": "MONTH",
+  "amountCents": 4900,
+  "currency": "USD"
+}
+
+> {%
+    client.global.set("auditPlanCode", response.body.code);
+%}
+
+### Setup: customer (records CUSTOMER_CREATED with no email or name in data)
+POST {{baseUrl}}/api/customers
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "email": "audit-{{$timestamp}}@acme.test",
+  "name": "Audit Customer"
+}
+
+> {%
+    client.global.set("auditCustomerId", response.body.id);
+%}
+
+### Setup: subscription (records SUBSCRIPTION_CREATED)
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "customerId": "{{auditCustomerId}}",
+  "planCode": "{{auditPlanCode}}"
+}
+
+> {%
+    client.global.set("auditSubscriptionId", response.body.id);
+%}
+
+### Pause (records SUBSCRIPTION_PAUSED, data.from = ACTIVE)
+POST {{baseUrl}}/api/subscriptions/{{auditSubscriptionId}}/pause
+Authorization: Bearer {{acmeToken}}
+
+### Resume twice: the first records SUBSCRIPTION_RESUMED, the second is 409 and records nothing
+POST {{baseUrl}}/api/subscriptions/{{auditSubscriptionId}}/resume
+Authorization: Bearer {{acmeToken}}
+
+###
+POST {{baseUrl}}/api/subscriptions/{{auditSubscriptionId}}/resume
+Authorization: Bearer {{acmeToken}}
+
+
+### Tenant timeline: newest first (expects 200; actorType USER, actorId = the admin's user id, requestId set)
+GET {{baseUrl}}/api/audit-events
+Authorization: Bearer {{acmeToken}}
+
+### One subscription's history (expects RESUMED, PAUSED, CREATED, and only one RESUMED)
+GET {{baseUrl}}/api/audit-events?entityType=SUBSCRIPTION&entityId={{auditSubscriptionId}}
+Authorization: Bearer {{acmeToken}}
+
+### Paged (expects size 2, totalElements >= 3)
+GET {{baseUrl}}/api/audit-events?entityType=SUBSCRIPTION&entityId={{auditSubscriptionId}}&size=2
+Authorization: Bearer {{acmeToken}}
+
+### Incomplete filter: entityType without entityId (expects 400 AUDIT_FILTER_INCOMPLETE)
+GET {{baseUrl}}/api/audit-events?entityType=SUBSCRIPTION
+Authorization: Bearer {{acmeToken}}
+
+### Not an admin: SUPPORT reads everything else, but not the audit log (expects 403 ACCESS_DENIED)
+GET {{baseUrl}}/api/audit-events
+Authorization: Bearer {{supportToken}}
+
+### No token (expects 401)
+GET {{baseUrl}}/api/audit-events
+
+### Tenant isolation: acme's subscription id under demo (expects 200 with an empty content list, not acme's events)
+GET {{baseUrl}}/api/audit-events?entityType=SUBSCRIPTION&entityId={{auditSubscriptionId}}
+Authorization: Bearer {{demoToken}}
+
+### Tenant isolation: a platform token on the tenant endpoint (expects 403; it names no tenant)
+GET {{baseUrl}}/api/audit-events
+Authorization: Bearer {{platformToken}}
+
+
+### Platform view of acme's log (expects 200, the same events as the tenant timeline)
+GET {{baseUrl}}/api/platform/tenants/acme/audit-events
+Authorization: Bearer {{platformToken}}
+
+### Platform lifecycle: deactivate then activate demo, then read demo's log
+### (expects TENANT_ACTIVATED and TENANT_DEACTIVATED with actorType PLATFORM_ADMIN).
+### Repeating a deactivate is a no-op and adds no event.
+POST {{baseUrl}}/api/platform/tenants/demo/deactivate
+Authorization: Bearer {{platformToken}}
+
+###
+POST {{baseUrl}}/api/platform/tenants/demo/deactivate
+Authorization: Bearer {{platformToken}}
+
+###
+POST {{baseUrl}}/api/platform/tenants/demo/activate
+Authorization: Bearer {{platformToken}}
+
+###
+GET {{baseUrl}}/api/platform/tenants/demo/audit-events?entityType=TENANT&entityId=demo
+Authorization: Bearer {{platformToken}}
+
+### Platform view of an unknown tenant (expects 404, not an empty page)
+GET {{baseUrl}}/api/platform/tenants/no-such-tenant/audit-events
+Authorization: Bearer {{platformToken}}
+
+### A tenant admin on the platform endpoint (expects 403)
+GET {{baseUrl}}/api/platform/tenants/acme/audit-events
+Authorization: Bearer {{acmeToken}}
