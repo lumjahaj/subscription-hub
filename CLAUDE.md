@@ -206,11 +206,11 @@ on every tenant-owned table.
   the claim, not a deny-list of `PLATFORM_ADMIN`, so a future third kind of token
   is refused by default. Anonymous callers still get 401: a denial for an anonymous
   principal is turned into the entry point's 401, not 403.
-- **A platform request has an empty `TenantContext`**, so with open-in-view its
-  session is pinned to the `__no_tenant__` sentinel. Harmless today — `tenant`,
-  `app_user` and `platform_user` are not `TenantScoped` — but a platform endpoint
-  that reads a `TenantScoped` entity silently gets nothing, and needs the
-  `PaymentWebhookService` session treatment.
+- **A platform request has an empty `TenantContext`**, so any session one of its
+  transactions opens is pinned to the `__no_tenant__` sentinel. Harmless today —
+  `tenant`, `app_user` and `platform_user` are not `TenantScoped` — but a platform
+  endpoint that reads a `TenantScoped` entity silently gets nothing unless it wraps
+  that transaction in `TenantContext.runAs(targetTenant)`.
 - Exceptions: `MissingTenantException` → 400 `TENANT_MISSING` now means *a valid
   token carrying no `tenant_id`*, i.e. one minted by something other than
   `AuthService`; `UnknownTenantException` → 401 `TENANT_UNKNOWN` means the tenant
@@ -234,24 +234,40 @@ explicitly in both for exactly this reason. A third,
 tenant, and returns one aggregate number and no rows. A new native query must be
 one of those two kinds, and say which.
 
-**A provider webhook has the same chicken-and-egg, from the other side.**
-`POST /api/webhooks/stripe` carries no token, so `TenantContext` is empty when
-`spring.jpa.open-in-view` opens the request's `EntityManager`, and Hibernate
-resolves `@TenantId` *at session open* — pinning every query to the
-`__no_tenant__` sentinel. The tenant is only knowable after the signature
-verifies, from the event's metadata. `PaymentWebhookService` therefore unbinds
-the request's `EntityManager`, sets the tenant, and runs settlement in a
-transaction that opens a fresh session, rebinding afterwards.
-`PROPAGATION_REQUIRES_NEW` looks like the fix and is not: suspension only happens
-when a transaction is already active, and open-in-view binds an `EntityManager`
-without one, so the new transaction simply adopts it — sentinel tenant included.
+**`spring.jpa.open-in-view` is off, and must stay off.** Hibernate resolves
+`@TenantId` *when a session opens*. With open-in-view the session opened at the
+start of every request and, under the `DELAYED_ACQUISITION_AND_HOLD` mode Spring
+configures, held its JDBC connection until the response was written — through
+`PaymentService`'s provider call and PDF streaming, with no transaction open. Off,
+a session and its connection last only as long as a transaction, and
+`OpenInViewDisabledIntegrationTest` fails if it comes back.
+
+The cost is that **a response may only read associations its finder loaded.**
+Mappers run in the controller, after the transaction has ended, so:
+- A mapper that reads `plan.getCode()` needs a finder with
+  `@EntityGraph(attributePaths = "plan")`.
+- `getX().getId()` on a proxy is safe and needs nothing.
+- A collection on a *paged* finder is initialized inside a read-only transaction
+  in the repository adapter instead (`InvoiceRepositoryImpl`). A collection fetch
+  combined with LIMIT/OFFSET makes Hibernate paginate in memory.
+- `AssociationReadsIntegrationTest` covers every endpoint that depends on this,
+  and a new one belongs there.
+
+**A provider webhook sets the tenant before its transaction.**
+`POST /api/webhooks/stripe` carries no token, and the tenant is only knowable after
+the signature verifies, from the event's metadata. `PaymentWebhookService` runs
+settlement inside `TenantContext.runAs(event.tenantId())` and opens the
+transaction there, so the session is scoped correctly. With open-in-view on, it
+had to unbind the request's already-open `EntityManager` (pinned to the sentinel)
+and rebind it afterwards. `PROPAGATION_REQUIRES_NEW` did not help: with no
+transaction active there was nothing to suspend. That workaround is gone.
 
 **`AppUserEntity` is the one tenant-owned entity that does not extend
 `TenantScoped`**, so it gets no `@TenantId` predicate. This is a chicken-and-egg,
 not an oversight: `@TenantId` resolves from `TenantContext` when the Hibernate
-session opens, and with `spring.jpa.open-in-view` that is the *start of the
-request* — before anything could know the tenant. Reading this table is what
-establishes it. Extending `TenantScoped` produced a self-contradicting
+session opens, and a login request has no tenant in context when its transaction
+opens, because reading this table is what establishes it. (It was first found
+with open-in-view on; turning that off did not change it.) Extending `TenantScoped` produced a self-contradicting
 `where tenant_id = '__no_tenant__' and tenant_id = 'acme'` and failed every login
 with correct credentials. Scoping stays explicit via `findByTenantIdAndEmail`, and
 the issued token takes its tenant from the row found rather than from the request.
@@ -715,9 +731,11 @@ subscription-hub-state skill's Known gaps):
 3. ~~**Observability**~~ Done: `/actuator/prometheus` behind a dedicated scrape
    account, job/business/outbox/login metrics, liveness and readiness probes, and
    Prometheus + Grafana in Compose with alert rules and a provisioned dashboard.
-4. **`spring.jpa.open-in-view` off, plus `@Version` on `subscription`.** Measured
-   with the connection-pool metrics from step 3. The subscription step needs a
-   retry-or-skip policy in dunning/settlement first, because those are its writers.
+4. ~~**`spring.jpa.open-in-view` off**~~ Done (4a): explicit fetch plans for every
+   response that reads an association, then the flag.
+   Still to come (4b): `@Version` on `subscription`. Its non-request writers need
+   a retry-or-skip policy first, above all the fake gateway: its settlement is
+   synchronous, so a version conflict would leave a payment `PENDING`.
 
 - **Audit events moved after authentication**, and had to. The point of an
   audit log is recording *who* did something, and building it before there was

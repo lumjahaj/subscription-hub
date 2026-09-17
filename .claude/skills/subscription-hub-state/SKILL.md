@@ -333,12 +333,14 @@ description: What is built in Subscription Hub, why each decision was made, and 
     metadata get 200 and are ignored, because a provider retries every non-2xx for
     days; only an unverifiable signature is a 400.
   - **The webhook's tenancy problem**, and the one genuine surprise in this work:
-    with `open-in-view`, the request's Hibernate session opens before the tenant is
-    knowable (it is inside the signed body), pinning every query to the
-    `__no_tenant__` sentinel. `PROPAGATION_REQUIRES_NEW` does not fix it — with no
-    active transaction there is nothing to suspend, so the new transaction adopts
-    the bound `EntityManager`. `PaymentWebhookService` unbinds it, sets the tenant,
-    settles in a fresh session, and rebinds. Caught by a test, not by reading.
+    with `open-in-view`, the request's Hibernate session opened before the tenant
+    was knowable (it is inside the signed body), pinning every query to the
+    `__no_tenant__` sentinel. `PROPAGATION_REQUIRES_NEW` did not fix it: with no
+    active transaction there was nothing to suspend, so the new transaction adopted
+    the bound `EntityManager`. `PaymentWebhookService` unbound it, set the tenant,
+    settled in a fresh session, and rebound it. Caught by a test, not by reading.
+    Open-in-view is off now (see the open-in-view entry in Known gaps), so only
+    "set the tenant, then open the transaction" remains.
   - **No Stripe account exists**, and none is needed: Stripe supports neither
     Kosovo nor Albania, and the signup country is permanent and must match a real
     entity there. `StripePaymentGatewayTest` runs the real SDK against
@@ -917,28 +919,51 @@ feature module does.
   still not atomic, but the losing side of the race now gets the same 409
   a synchronous duplicate does, instead of a 500.
 - ~~`Page<T>` serialization~~ — closed. See Current state's API hardening pass.
-- **`spring.jpa.open-in-view` is on, by default** (it is set nowhere; Boot logs a
-  warning). Turning it off is roadmap step 4 in CLAUDE.md §7, and it removes less than it
-  looks like it should. **It removes** `PaymentWebhookService`'s unbind/rebind,
-  and makes `TenantContext.runAs` before a transaction enough for a platform
-  request. **It does not remove** the `AppUserEntity` and `AuditEventEntity`
-  exceptions: login and provisioning have no tenant in context when their
-  transaction opens, with or without open-in-view. Removing those needs
-  `AuthService` and `TenantProvisioningService` restructured around
-  `runAs` + `TransactionTemplate`; open-in-view only makes that impossible today.
-  **What breaks when it is off:** lazy loading in mappers called by controllers
-  outside a transaction: `PlanMapper` (`getProduct().getCode()`),
-  `PlanEntitlementMapper` and `SubscriptionMapper` (`getPlan().getCode()`,
-  including cancel/pause/resume), and `InvoiceMapper` (`getLines()`).
-  `getX().getId()` on a proxy is safe. The fix is `@EntityGraph` on the finders
-  those endpoints use.
-  **Unverified, check before relying on it:** Spring's `HibernateJpaVendorAdapter`
-  is believed to set `DELAYED_ACQUISITION_AND_HOLD`, which with open-in-view would
-  keep the JDBC connection from `PaymentService`'s reserve step checked out
-  through the provider HTTP call and through PDF streaming. That would undercut the
-  "no provider call inside a transaction" rule for the connection pool, even
-  though no transaction is open. Observability's `hikaricp.connections.active`
-  during a slowed provider call is the way to confirm it.
+- ~~`spring.jpa.open-in-view` is on, by default~~ — turned off (roadmap step 4a).
+  - **Why:** Spring's `HibernateJpaVendorAdapter` sets Hibernate's connection
+    handling to `DELAYED_ACQUISITION_AND_HOLD` (confirmed in its source). With
+    open-in-view on, a request therefore kept the JDBC connection from
+    `PaymentService`'s reserve step checked out through the provider HTTP call and
+    through PDF streaming, until the response was written. The "no remote call
+    inside a transaction" rule held for transactions, but not for the connection
+    pool. This was not demonstrated under load with a slowed provider; the source
+    is the evidence.
+  - **Measured before changing anything.** With only the flag flipped, 11 of 343
+    tests failed with `LazyInitializationException`, from two mappers:
+    `SubscriptionMapper` reading `plan.getCode()`, and `InvoiceMapper` reading
+    `lines`. A live probe of every read endpoint then found three 500s the suite
+    could not see, because no test read those endpoints:
+    - the plan list and single plan (`PlanMapper` reads `product.getCode()`)
+    - the subscription list
+    - the invoice list
+
+    The entitlement list has the same shape (`plan.getCode()`), found by reading.
+  - **Fixed with explicit fetch plans, not transactions around mapping.** Mappers
+    stay in the controller. `@EntityGraph` was added to the finders behind those
+    responses, following the one that already existed
+    (`InvoiceJpaRepository.findByTenantIdAndId` → `lines`):
+    - `PlanJpaRepository` → `product`
+    - `PlanEntitlementJpaRepository` → `plan`
+    - `SubscriptionJpaRepository`'s three request finders → `plan`
+
+    The paged invoice finders are the exception. A collection fetch with
+    LIMIT/OFFSET makes Hibernate paginate in memory (HHH90003004), so
+    `InvoiceRepositoryImpl` initializes `lines` inside a read-only transaction,
+    and `@BatchSize(32)` loads a page's lines in one extra query. That batch loading
+    only ever worked because open-in-view kept the session alive.
+  - **Pinned by two tests.** `AssociationReadsIntegrationTest` reads every one of
+    those endpoints and asserts the associated field.
+    `OpenInViewDisabledIntegrationTest` fails if the interceptor is registered
+    again.
+  - **Verified after the change:** 349 tests pass, the build log has no
+    `LazyInitializationException` or HHH90003004, and the live probe returns 200
+    with `productCode`, `planCode` and `lines` populated.
+  - **What it removed, and what it did not.** It removed `PaymentWebhookService`'s
+    unbind/rebind. It did not remove the `AppUserEntity` and `AuditEventEntity`
+    exceptions: login and platform requests still have no tenant in context when
+    their transaction opens. `AuditEventEntity` *could* now extend `TenantScoped`,
+    if every platform use case wrapped its transaction in `runAs(targetTenant)`. It
+    is left as it is, deliberately (see its javadoc).
 
 **Testing**
 
