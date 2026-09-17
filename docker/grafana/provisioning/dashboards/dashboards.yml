@@ -1,0 +1,12 @@
+# Loads every dashboard JSON under /var/lib/grafana/dashboards (mounted from
+# docker/grafana/dashboards). Edits made in the UI are not saved back to the
+# repository: export the JSON and commit it instead.
+apiVersion: 1
+
+providers:
+  - name: subscription-hub
+    folder: Subscription Hub
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

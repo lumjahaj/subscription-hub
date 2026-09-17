@@ -1,0 +1,99 @@
+# Alert rules for Subscription Hub. Each one names the failure it catches,
+# because an alert nobody can act on gets muted.
+#
+# There is no Alertmanager locally: firing alerts are visible at
+# http://localhost:9090/alerts, which is enough to see them work.
+
+groups:
+  - name: subscription-hub
+    rules:
+      - alert: SubscriptionHubDown
+        # Also fires when the scrape credential is wrong: up is 0 for a 401.
+        expr: up{job="subscription-hub"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Prometheus cannot scrape Subscription Hub (down, or the scrape credential is wrong)
+
+      - alert: HighServerErrorRate
+        # 5xx only. Client mistakes are 4xx since the error-mapping sweep,
+        # so this ratio no longer counts a caller's typo as our failure.
+        expr: |
+          sum(rate(http_server_requests_seconds_count{application="subscription-hub", status=~"5.."}[5m]))
+            / sum(rate(http_server_requests_seconds_count{application="subscription-hub"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5% of requests are failing with a server error
+
+      - alert: BillingCycleJobStale
+        # Hourly cron; two missed runs means invoices and renewals have stopped.
+        # A job that has not run once since startup has no series yet, so this
+        # cannot fire in the first hour after a restart.
+        expr: time() - jobs_last_success_seconds{scheduled_job="billing-cycle"} > 2 * 3600
+        labels:
+          severity: critical
+        annotations:
+          summary: BillingCycleJob has not completed a run in over two hours
+
+      - alert: DunningJobStale
+        expr: time() - jobs_last_success_seconds{scheduled_job="dunning"} > 2 * 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: DunningJob has not completed a run in over two hours
+
+      - alert: NotificationRelayStale
+        # Runs every few seconds, so ten minutes of silence is certainly broken.
+        expr: time() - jobs_last_success_seconds{scheduled_job="notification-relay"} > 600
+        labels:
+          severity: warning
+        annotations:
+          summary: NotificationRelayJob has not completed a run in ten minutes
+
+      - alert: JobItemsFailing
+        expr: sum by (scheduled_job, step) (increase(jobs_item_failures_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.scheduled_job }} is skipping items that fail at step {{ $labels.step }}"
+
+      - alert: NotificationsNotPublished
+        # PENDING growing: the relay is not moving rows onto the queue.
+        expr: notification_outbox_oldest_age_seconds{status="PENDING"} > 600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A notification has waited over ten minutes to be published
+
+      - alert: NotificationsNotDelivered
+        # PUBLISHED growing: published but never sent - SMTP failing, or the
+        # message is in notifications-dlq, which nothing else reads.
+        expr: notification_outbox_oldest_age_seconds{status="PUBLISHED"} > 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: A published notification has not been delivered for over an hour (check notifications-dlq)
+
+      - alert: LoginFailureSpike
+        # About 60 rejected logins a minute, sustained. The endpoint has no
+        # rate limiting, so this is the only defence that notices brute force.
+        expr: sum by (principal) (rate(auth_login_failures_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained failed logins for {{ $labels.principal }} accounts"
+
+      - alert: DatabasePoolSaturated
+        # Requests waiting for a connection. The pool is 10 by default, and
+        # anything holding a connection across a slow remote call shows up here.
+        expr: max(hikaricp_connections_pending{application="subscription-hub"}) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Requests are queueing for a database connection

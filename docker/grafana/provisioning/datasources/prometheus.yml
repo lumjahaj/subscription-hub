@@ -1,0 +1,12 @@
+# Provisioned so a fresh `docker compose up` needs no clicking. The fixed uid
+# is what the committed dashboard JSON refers to.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

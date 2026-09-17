@@ -1,0 +1,24 @@
+# Local Prometheus for Subscription Hub. Started by docker-compose.yml;
+# the application itself runs on the host (./mvnw spring-boot:run), so the
+# target is host.docker.internal rather than a compose service name.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: subscription-hub
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+    # The dedicated scrape account (MetricsSecurityConfig), never a JWT:
+    # tokens expire after an hour and this secret has to sit in a config.
+    # The username must equal METRICS_SCRAPE_USERNAME in .env. The password
+    # is written to this file from METRICS_SCRAPE_PASSWORD when the container
+    # starts (see docker-compose.yml), so no secret is committed here.
+    basic_auth:
+      username: prometheus
+      password_file: /tmp/metrics-scrape-password
