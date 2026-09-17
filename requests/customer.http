@@ -124,3 +124,113 @@ Authorization: Bearer {{acmeToken}}
 ### Get Customer — tenant isolation: acme's id under demo (expects 404 CUSTOMER_NOT_FOUND)
 GET {{baseUrl}}/api/customers/{{janeId}}
 Authorization: Bearer {{demoToken}}
+
+### ---------------------------------------------------------------------
+### Update Customer (PUT, optimistic locking)
+### Every single-customer response carries an ETag, the customer's
+### version. An update must send it back as If-Match: missing is 428,
+### stale is 412, so two people editing the same customer cannot silently
+### overwrite each other.
+### ---------------------------------------------------------------------
+
+### Get Customer — capture the current ETag
+GET {{baseUrl}}/api/customers/{{janeId}}
+Authorization: Bearer {{acmeToken}}
+
+> {%
+    client.global.set("janeEtag", response.headers.valueOf("ETag"));
+%}
+
+### Update Customer — happy path (expects 200 and a new ETag)
+### Full replacement: externalId is sent, since omitting it would clear it.
+### The email stays the same so this file can be re-run.
+PUT {{baseUrl}}/api/customers/{{janeId}}
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+If-Match: {{janeEtag}}
+
+{
+  "externalId": "cus_stripe_12345",
+  "email": "jane@acme.test",
+  "name": "Jane Doe-Smith"
+}
+
+> {%
+    client.global.set("janeStaleEtag", client.global.get("janeEtag"));
+    client.global.set("janeEtag", response.headers.valueOf("ETag"));
+%}
+
+### Update Customer — the same ETag again (expects 412 PRECONDITION_FAILED)
+### A second client still holding the ETag from before the update above.
+PUT {{baseUrl}}/api/customers/{{janeId}}
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+If-Match: {{janeStaleEtag}}
+
+{
+  "externalId": "cus_stripe_12345",
+  "email": "jane@acme.test",
+  "name": "Lost Update"
+}
+
+### Update Customer — no If-Match (expects 428 PRECONDITION_REQUIRED)
+PUT {{baseUrl}}/api/customers/{{janeId}}
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "externalId": "cus_stripe_12345",
+  "email": "jane@acme.test",
+  "name": "Blind Overwrite"
+}
+
+### Update Customer — If-Match: * (expects 428: a wildcard is an unconditional overwrite)
+PUT {{baseUrl}}/api/customers/{{janeId}}
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+If-Match: *
+
+{
+  "externalId": "cus_stripe_12345",
+  "email": "jane@acme.test",
+  "name": "Wildcard Overwrite"
+}
+
+### Update Customer — an email another customer has (expects 409 CUSTOMER_ALREADY_EXISTS)
+PUT {{baseUrl}}/api/customers/{{janeId}}
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+If-Match: {{janeEtag}}
+
+{
+  "externalId": "cus_stripe_12345",
+  "email": "bob@acme.test",
+  "name": "Jane Doe-Smith"
+}
+
+### Update Customer — invalid fields (expects 400 VALIDATION_ERROR)
+PUT {{baseUrl}}/api/customers/{{janeId}}
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+If-Match: {{janeEtag}}
+
+{
+  "email": "not-an-email",
+  "name": ""
+}
+
+### Update Customer — tenant isolation: acme's id under demo (expects 404 CUSTOMER_NOT_FOUND)
+PUT {{baseUrl}}/api/customers/{{janeId}}
+Content-Type: application/json
+Authorization: Bearer {{demoToken}}
+If-Match: {{janeEtag}}
+
+{
+  "externalId": "cus_stripe_12345",
+  "email": "jane@acme.test",
+  "name": "Cross Tenant"
+}
+
+### Audit — the update is recorded with the changed field names, never the values
+GET {{baseUrl}}/api/audit-events?entityType=CUSTOMER&entityId={{janeId}}
+Authorization: Bearer {{acmeToken}}
