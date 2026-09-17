@@ -22,6 +22,7 @@ public enum AuditEventType {
     PLAN_ENTITLEMENT_CREATED(AuditEntityType.PLAN_ENTITLEMENT),
 
     CUSTOMER_CREATED(AuditEntityType.CUSTOMER),
+    CUSTOMER_UPDATED(AuditEntityType.CUSTOMER),
     PAYMENT_METHOD_SET(AuditEntityType.CUSTOMER),
     PAYMENT_METHOD_REMOVED(AuditEntityType.CUSTOMER),
 

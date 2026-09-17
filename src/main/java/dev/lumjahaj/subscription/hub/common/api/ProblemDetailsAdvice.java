@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.mapping.PropertyReferenceException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -208,6 +209,17 @@ public class ProblemDetailsAdvice {
         // not-null violation) — treat like any other unexpected failure.
         log.error("Unhandled data integrity violation", ex);
         return base(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Unexpected error");
+    }
+
+    // A @Version check failed at flush: another write committed between this
+    // request's read and its write. Not logged as an error - it is the
+    // mechanism working, and the caller only has to re-read and retry.
+    // A stale If-Match caught before writing is the 412 instead; this is the
+    // narrower race after that check passed.
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    ProblemDetail handleOptimisticLockingFailure(OptimisticLockingFailureException ex) {
+        return base(HttpStatus.CONFLICT, "CONCURRENT_MODIFICATION",
+                "The resource was modified by another request; read it again and retry");
     }
 
     private String constraintViolationResourceType(DataIntegrityViolationException ex) {

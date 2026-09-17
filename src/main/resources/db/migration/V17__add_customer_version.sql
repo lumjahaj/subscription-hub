@@ -1,0 +1,14 @@
+-- Optimistic locking for customer, which is about to get the first update
+-- endpoint in the codebase (PUT /api/customers/{id}).
+--
+-- NOT NULL DEFAULT 0 rather than nullable: Spring Data's save() decides
+-- between persist and merge by asking whether the entity is new, and for an
+-- entity with a wrapper-typed @Version that means "is the version null". An
+-- existing row with a null version would look new, be persisted instead of
+-- merged, and fail on the primary key. The default backfills every existing
+-- row in the same statement.
+--
+-- Only customer. tenant's activation flag is protected by a conditional
+-- UPDATE instead (TenantJpaRepository.updateActiveIfDifferent): that is an
+-- idempotent command, not an edit of something the caller read earlier.
+ALTER TABLE customer ADD COLUMN version bigint NOT NULL DEFAULT 0;

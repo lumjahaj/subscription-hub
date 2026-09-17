@@ -28,6 +28,15 @@ public class CustomerEntity extends TenantScoped {
     @Column(name = "default_payment_method", length = 64)
     private String defaultPaymentMethod;
 
+    // Optimistic locking (V17). Hibernate adds "and version = ?" to every
+    // UPDATE and increments it, so a write based on a stale read fails
+    // instead of silently overwriting. Exposed to clients as the ETag.
+    // A wrapper type: Spring Data treats a null version as "new", which is
+    // why the column is NOT NULL DEFAULT 0 for existing rows.
+    @Version
+    @Column(nullable = false)
+    private Long version;
+
     public java.util.UUID getId() {return id;}
     public void setId(java.util.UUID id) {this.id = id;}
     public String getExternalId() {return externalId;}
@@ -38,4 +47,8 @@ public class CustomerEntity extends TenantScoped {
     public void setName(String name) {this.name = name;}
     public String getDefaultPaymentMethod() {return defaultPaymentMethod;}
     public void setDefaultPaymentMethod(String defaultPaymentMethod) {this.defaultPaymentMethod = defaultPaymentMethod;}
+    // No setter: the version belongs to Hibernate. Changing it on a managed
+    // entity is not how a caller states which version it read - that check
+    // is explicit, in CustomerService.update.
+    public Long getVersion() {return version;}
 }

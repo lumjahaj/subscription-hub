@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 
 import java.sql.SQLException;
@@ -71,6 +72,15 @@ class ProblemDetailsAdviceTest {
         assertThat(problem.getProperties())
                 .containsEntry("code", "VALIDATION_ERROR")
                 .containsEntry("details", List.of("customerId parameter is required"));
+    }
+
+    @Test
+    void optimisticLockFailureIs409ConcurrentModification() {
+        ProblemDetail problem = advice.handleOptimisticLockingFailure(
+                new ObjectOptimisticLockingFailureException(Object.class, "id"));
+
+        assertThat(problem.getStatus()).isEqualTo(HttpStatus.CONFLICT.value());
+        assertThat(problem.getProperties()).containsEntry("code", "CONCURRENT_MODIFICATION");
     }
 
     private String codeFor(String constraintName) {
