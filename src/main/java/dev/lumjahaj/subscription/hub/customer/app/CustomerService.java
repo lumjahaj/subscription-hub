@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.customer.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.common.api.ResourceAlreadyExistsException;
 import dev.lumjahaj.subscription.hub.common.api.ResourceNotFoundException;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerCreateRequest;
@@ -12,15 +14,18 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Map;
 import java.util.UUID;
 
 @Service
 public class CustomerService {
 
     private final CustomerRepository customers;
+    private final AuditService audit;
 
-    public CustomerService(CustomerRepository customers) {
+    public CustomerService(CustomerRepository customers, AuditService audit) {
         this.customers = customers;
+        this.audit = audit;
     }
 
     @Transactional
@@ -34,7 +39,11 @@ public class CustomerService {
 
         CustomerEntity entity = CustomerMapper.toEntity(request);
         entity.setTenantId(tenantId);
-        return customers.save(entity);
+        CustomerEntity saved = customers.save(entity);
+        // No email or name: audit rows are kept for good, and the customer
+        // row is where personal data belongs.
+        audit.record(AuditEventType.CUSTOMER_CREATED, saved.getId(), Map.of());
+        return saved;
     }
 
     public Page<CustomerEntity> list(Pageable pageable) {
@@ -60,8 +69,12 @@ public class CustomerService {
     @Transactional
     public CustomerEntity setDefaultPaymentMethod(UUID id, String paymentMethod) {
         CustomerEntity customer = getById(id);
+        boolean replaced = customer.getDefaultPaymentMethod() != null;
         customer.setDefaultPaymentMethod(paymentMethod);
-        return customers.save(customer);
+        CustomerEntity saved = customers.save(customer);
+        // Never the token itself: it is a credential that can be charged.
+        audit.record(AuditEventType.PAYMENT_METHOD_SET, saved.getId(), Map.of("replaced", replaced));
+        return saved;
     }
 
     /**
@@ -72,7 +85,13 @@ public class CustomerService {
     @Transactional
     public CustomerEntity clearDefaultPaymentMethod(UUID id) {
         CustomerEntity customer = getById(id);
+        if (customer.getDefaultPaymentMethod() == null) {
+            // Nothing changed, so there is nothing to record.
+            return customer;
+        }
         customer.setDefaultPaymentMethod(null);
-        return customers.save(customer);
+        CustomerEntity saved = customers.save(customer);
+        audit.record(AuditEventType.PAYMENT_METHOD_REMOVED, saved.getId(), Map.of());
+        return saved;
     }
 }

@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.catalog.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanEntitlementCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.mapper.PlanEntitlementMapper;
 import dev.lumjahaj.subscription.hub.catalog.domain.PlanEntitlementRepository;
@@ -13,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class PlanEntitlementService {
@@ -20,15 +23,18 @@ public class PlanEntitlementService {
     private final PlanEntitlementRepository entitlements;
     private final PlanRepository plans;
     private final PlanEntitlementMapper mapper;
+    private final AuditService audit;
 
     public PlanEntitlementService(
             PlanEntitlementRepository entitlements,
             PlanRepository plans,
-            PlanEntitlementMapper mapper
+            PlanEntitlementMapper mapper,
+            AuditService audit
     ) {
         this.entitlements = entitlements;
         this.plans = plans;
         this.mapper = mapper;
+        this.audit = audit;
     }
 
     @Transactional
@@ -46,7 +52,12 @@ public class PlanEntitlementService {
         PlanEntitlementEntity entity = mapper.toEntity(request);
         entity.setTenantId(tenantId);
         entity.setPlan(plan);
-        return entitlements.save(entity);
+        PlanEntitlementEntity saved = entitlements.save(entity);
+        audit.record(AuditEventType.PLAN_ENTITLEMENT_CREATED, saved.getId(), Map.of(
+                "planCode", planCode,
+                "key", saved.getKey(),
+                "value", request.value()));
+        return saved;
     }
 
     public List<PlanEntitlementEntity> list(String planCode) {

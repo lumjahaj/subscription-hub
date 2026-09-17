@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.subscription.api;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanResponse;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductCreateRequest;
@@ -108,6 +109,17 @@ class SubscriptionLifecycleIntegrationTest extends AbstractIntegrationTest {
                 new HttpEntity<>(tenantHeaders(TENANT)), String.class);
         assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(second.getBody()).contains("INVALID_SUBSCRIPTION_STATE");
+
+        // One cancellation happened and one was refused, so the log shows
+        // exactly one, attributed to the admin who made it.
+        JsonNode history = auditHistory(TENANT, "SUBSCRIPTION", subscriptionId);
+        assertThat(history).extracting(event -> event.get("type").asText())
+                .containsExactly("SUBSCRIPTION_CANCELED", "SUBSCRIPTION_CREATED");
+        JsonNode canceled = history.get(0);
+        assertThat(canceled.get("actorType").asText()).isEqualTo("USER");
+        assertThat(canceled.get("actorId").asText()).isNotBlank();
+        assertThat(canceled.get("requestId").asText()).isNotBlank();
+        assertThat(canceled.get("data").get("from").asText()).isEqualTo("ACTIVE");
     }
 
     @Test

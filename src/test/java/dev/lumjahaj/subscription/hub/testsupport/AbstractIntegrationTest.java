@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.testsupport;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.lumjahaj.subscription.hub.auth.api.dto.PlatformTokenRequest;
 import dev.lumjahaj.subscription.hub.auth.api.dto.PlatformTokenResponse;
 import dev.lumjahaj.subscription.hub.auth.api.dto.TokenRequest;
@@ -189,6 +190,20 @@ public abstract class AbstractIntegrationTest {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(TOKENS.computeIfAbsent("platform:admin", key -> platformLogin()));
         return headers;
+    }
+
+    /**
+     * One record's audit history as the tenant's admin sees it, newest first.
+     * The status is asserted here so a failing read shows up as that, not as a
+     * missing event.
+     */
+    protected JsonNode auditHistory(String tenantId, String entityType, Object entityId) {
+        ResponseEntity<JsonNode> response = restTemplate.exchange(
+                "/api/audit-events?entityType=" + entityType + "&entityId=" + entityId, HttpMethod.GET,
+                new HttpEntity<>(tenantHeaders(tenantId)), JsonNode.class);
+        assertThat(response.getStatusCode()).as("audit history of %s %s", entityType, entityId)
+                .isEqualTo(HttpStatus.OK);
+        return response.getBody().get("content");
     }
 
     private String platformLogin() {

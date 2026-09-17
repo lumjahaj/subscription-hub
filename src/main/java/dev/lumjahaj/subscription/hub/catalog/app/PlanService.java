@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.catalog.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanCreateRequest;
 import dev.lumjahaj.subscription.hub.catalog.api.mapper.PlanMapper;
 import dev.lumjahaj.subscription.hub.catalog.domain.PlanRepository;
@@ -14,15 +16,19 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Map;
+
 @Service
 public class PlanService {
 
     private final PlanRepository plans;
     private final ProductRepository products;
+    private final AuditService audit;
 
-    public PlanService(PlanRepository plans, ProductRepository products) {
+    public PlanService(PlanRepository plans, ProductRepository products, AuditService audit) {
         this.plans = plans;
         this.products = products;
+        this.audit = audit;
     }
 
     @Transactional
@@ -42,7 +48,19 @@ public class PlanService {
         PlanEntity entity = PlanMapper.toEntity(request);
         entity.setTenantId(tenantId);
         entity.setProduct(product);
-        return plans.save(entity);
+        PlanEntity saved = plans.save(entity);
+        // The price as it was set. Plans have no update endpoint yet, but
+        // "what did this plan cost, and who set it" is exactly what an audit
+        // log is for once they do.
+        audit.record(AuditEventType.PLAN_CREATED, saved.getId(), Map.of(
+                "code", saved.getCode(),
+                "productCode", product.getCode(),
+                "amountCents", saved.getAmountCents(),
+                "currency", saved.getCurrency(),
+                "intervalUnit", saved.getIntervalUnit(),
+                "intervalCount", saved.getIntervalCount(),
+                "trialDays", saved.getTrialDays()));
+        return saved;
     }
 
     public Page<PlanEntity> list(Pageable pageable) {

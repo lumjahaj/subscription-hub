@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.subscription.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.catalog.domain.PlanRepository;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.common.api.ResourceNotFoundException;
@@ -16,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -24,15 +27,18 @@ public class SubscriptionService {
     private final SubscriptionRepository subscriptions;
     private final CustomerRepository customers;
     private final PlanRepository plans;
+    private final AuditService audit;
 
     public SubscriptionService(
             SubscriptionRepository subscriptions,
             CustomerRepository customers,
-            PlanRepository plans
+            PlanRepository plans,
+            AuditService audit
     ) {
         this.subscriptions = subscriptions;
         this.customers = customers;
         this.plans = plans;
+        this.audit = audit;
     }
 
     @Transactional
@@ -66,7 +72,12 @@ public class SubscriptionService {
             entity.setNextRenewal(periodEnd);
         }
 
-        return subscriptions.save(entity);
+        SubscriptionEntity saved = subscriptions.save(entity);
+        audit.record(AuditEventType.SUBSCRIPTION_CREATED, saved.getId(), Map.of(
+                "customerId", customer.getId(),
+                "planCode", plan.getCode(),
+                "status", saved.getStatus()));
+        return saved;
     }
 
     @Transactional
@@ -75,9 +86,12 @@ public class SubscriptionService {
         if (subscription.getStatus() == SubscriptionStatus.CANCELED) {
             throw new InvalidSubscriptionStateException("cancel", subscription.getStatus());
         }
+        SubscriptionStatus from = subscription.getStatus();
         subscription.setStatus(SubscriptionStatus.CANCELED);
         subscription.setCanceledAt(Instant.now());
-        return subscriptions.save(subscription);
+        SubscriptionEntity saved = subscriptions.save(subscription);
+        audit.record(AuditEventType.SUBSCRIPTION_CANCELED, saved.getId(), Map.of("from", from));
+        return saved;
     }
 
     @Transactional
@@ -87,8 +101,11 @@ public class SubscriptionService {
                 && subscription.getStatus() != SubscriptionStatus.TRIALING) {
             throw new InvalidSubscriptionStateException("pause", subscription.getStatus());
         }
+        SubscriptionStatus from = subscription.getStatus();
         subscription.setStatus(SubscriptionStatus.PAUSED);
-        return subscriptions.save(subscription);
+        SubscriptionEntity saved = subscriptions.save(subscription);
+        audit.record(AuditEventType.SUBSCRIPTION_PAUSED, saved.getId(), Map.of("from", from));
+        return saved;
     }
 
     @Transactional
@@ -98,7 +115,9 @@ public class SubscriptionService {
             throw new InvalidSubscriptionStateException("resume", subscription.getStatus());
         }
         subscription.setStatus(SubscriptionStatus.ACTIVE);
-        return subscriptions.save(subscription);
+        SubscriptionEntity saved = subscriptions.save(subscription);
+        audit.record(AuditEventType.SUBSCRIPTION_RESUMED, saved.getId(), Map.of());
+        return saved;
     }
 
     public SubscriptionEntity getById(UUID id) {
