@@ -612,7 +612,8 @@ description: What is built in Subscription Hub, why each decision was made, and 
     was harmless with one write per use case, and MANDATORY refused it as soon
     as a second write (the event) existed. Made transactional in a separate
     refactor commit. This does not prevent lost updates between concurrent
-    requests; there is no `@Version` anywhere.
+    requests; at the time there was no `@Version` anywhere (see Customer
+    updates below for the first).
   - **Actor = kind + id, resolved from the security context** (`AuditActors`),
     never passed by the caller. A `tenant_id` claim means `USER`, the
     `PLATFORM_ADMIN` role means `PLATFORM_ADMIN`, and no JWT (a job, or a webhook's
@@ -653,6 +654,65 @@ description: What is built in Subscription Hub, why each decision was made, and 
     `AUDIT_FILTER_INCOMPLETE`: silently returning the whole timeline would look
     like one record's history. A tenant's admins see what the platform did to
     their tenant as well.
+- **Customer updates and optimistic locking** — `PUT /api/customers/{id}`, the
+  first update endpoint in the codebase, plus V17 (`customer.version`). Closes
+  the update half of "no update or delete anywhere", and the
+  concurrent-deactivation double-record.
+  - **Customer, not Plan or Product.** A plan's price is read when an invoice is
+    generated, so editing it would reprice every subscriber's current, unbilled
+    period. That is a plan-versioning design problem, not an endpoint. Product
+    was safe but too trivial to show anything.
+  - **`@Version` alone does not stop a lost update between two clients.** It
+    only catches overlap within one request's read-modify-write, a
+    milliseconds-wide window. The real lost update is two people who each GET,
+    edit for a minute, and PUT. So the version goes out as a strong `ETag` on
+    every single-customer response, including the payment-method ones, and the
+    PUT requires it back as `If-Match`:
+
+    | Case | Status | `code` |
+    |---|---|---|
+    | `If-Match` missing, or `*` | 428 | `PRECONDITION_REQUIRED` |
+    | Not the current version, detected before writing | 412 | `PRECONDITION_FAILED` |
+    | Version matched at load, then another write committed before this flush | 409 | `CONCURRENT_MODIFICATION` |
+
+    `*` counts as missing because RFC 9110 lets it mean "any version", an
+    unconditional overwrite by another name. Refusing a missing `If-Match` rather
+    than applying it makes the protection mandatory: opt-in would protect only
+    the careful clients.
+  - **Two checks for two windows.** `CustomerService.update` compares the loaded
+    version with the one the client sent (412), and `@Version` adds
+    `and version = ?` to the UPDATE for the gap between that load and the flush.
+    The version is compared explicitly because writing it onto a managed entity
+    does not work: Hibernate checks the version it loaded.
+    `ObjectOptimisticLockingFailureException` surfaces at commit, still inside
+    dispatch, and `ProblemDetailsAdvice` maps it.
+  - **Proven deterministically, not only by racing.** The 8-thread HTTP test
+    accepts 412 or 409 for the losers, so it cannot show the 409 path ever ran.
+    A second test loads the customer in a transaction, commits a versioned
+    UPDATE from another thread's connection, then commits, and asserts the
+    exception type. It must be another thread: on the same thread `JdbcTemplate`
+    joins the JPA transaction.
+  - **Only real changes.** An identical PUT writes nothing, so the version and
+    every other client's ETag stay valid. `CUSTOMER_UPDATED` lists
+    `changedFields` by name, never the values, which are personal data.
+  - **PUT, full replacement**, with the same fields and validation as create. An
+    omitted `externalId` clears it. The payment method is not part of the
+    representation; it keeps its own sub-resource. PATCH was rejected because a
+    record cannot tell an absent field from an explicit null without
+    `JsonNullable` or JSON Merge Patch.
+  - **Tenant activation got a conditional UPDATE instead of `@Version`.**
+    `setActive` used to read the flag, then write it, so two concurrent
+    deactivations could each see "active" and each record `TENANT_DEACTIVATED`.
+    `@Version` would have fixed the double record, but by giving the loser a 409
+    for a command whose intent was already satisfied, and deactivation is
+    documented as idempotent. Now `UPDATE tenant SET active = :active ... WHERE
+    id = :id AND active <> :active` reports whether it changed a row, and only
+    that call records. Under READ COMMITTED, Postgres re-evaluates the WHERE on
+    the committed row once the first transaction releases its lock, so exactly
+    one call sees a change. An 8-thread test asserts eight 200s and one event.
+    The rule it leaves behind: optimistic locking is for edits made from
+    something the caller read earlier; conditional updates are for state
+    commands.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -695,7 +755,7 @@ POST GET      /api/plans
 GET            /api/plans/{code}
 POST GET      /api/plans/{planCode}/entitlements
 POST GET      /api/customers
-GET            /api/customers/{id}
+GET PUT        /api/customers/{id}          (PUT needs If-Match with the ETag from a read)
 POST GET      /api/subscriptions[?customerId=]
 GET            /api/subscriptions/{id}
 POST GET      /api/subscriptions/{subscriptionId}/usage
@@ -805,7 +865,13 @@ feature module does.
 - ~~No single-resource reads~~ — closed. See Current state's API hardening pass.
   `GET /{code}` (Product, Plan) / `GET /{id}` (Customer, Subscription) plus
   `Location` on 201.
-- Still no update or delete anywhere.
+- **Updates exist for Customer only, and deletes nowhere.** See Current state's
+  Customer updates. Product and Plan remain create-only on purpose until plan
+  price changes have a versioning answer (a price edit would reprice unbilled
+  periods). Subscription changes go through state commands
+  (cancel/pause/resume), not a general update. Delete is absent everywhere,
+  because every tenant table cascades and invoices, payments and audit events
+  hang off these rows.
 - No idempotency on create endpoints. Worth at least being able to discuss.
 
 **Smaller**
@@ -1025,12 +1091,10 @@ feature module does.
   with it. Retention also stays unbounded.
 - **Failed logins and authorization denials are not recorded**, deliberately:
   they belong to Observability, as a metric and an alert on a spike.
-- **Two concurrent deactivations can both record.** `setActive` reads the flag,
-  then updates it, without a lock, so two simultaneous calls may each see
-  "active" and each write `TENANT_DEACTIVATED`. It is harmless and rare, and it
-  is not worth a pessimistic lock. `@Version` on `tenant` (CLAUDE.md §7 roadmap step 2)
-  closes it for free: the losing transaction fails its version check at flush,
-  and `AuditService.record`'s MANDATORY propagation takes the event down with it.
+- ~~Two concurrent deactivations can both record~~ — closed by a conditional
+  UPDATE that reports whether it changed the row (see Current state's Customer
+  updates for why not `@Version`). Every caller still gets 200, and exactly one
+  event is recorded.
 - **Ordering is by `created_at` only.** Two events in one transaction can share a
   timestamp at the clock's resolution, and then their relative order in a
   response is unspecified. No read depends on it today.

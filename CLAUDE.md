@@ -291,6 +291,25 @@ never return a raw `Page<T>`, whose `PageImpl` serialization isn't a documented
 contract. Nested per-parent collections (`/api/plans/{planCode}/entitlements`,
 `/api/subscriptions/{subscriptionId}/usage`) return a plain `List<Response>`.
 
+**Updates** — the pattern `CustomerController`/`CustomerService.update` set:
+- **Shape:** `PUT` with a full-replacement `XxxUpdateRequest` record, not PATCH.
+  A record cannot tell an absent field from an explicit null.
+- **Entity:** `@Version Long` backed by `bigint NOT NULL DEFAULT 0`. A null version
+  makes Spring Data's `save` treat an existing row as new and persist it.
+- **Every single-resource response** carries `ETag` (`ETags.of(version)`), and the
+  update takes `If-Match` through `ETags.requireIfMatch`: missing or `*` is 428,
+  not one of our ETags is 412.
+- **The service compares versions explicitly** (412), and `@Version` catches the
+  race after that check (409 `CONCURRENT_MODIFICATION`). Setting the version on a
+  managed entity does not work: Hibernate checks the version it loaded.
+- **Write and audit only real changes.** A no-op PUT must not bump the version, or
+  it invalidates every other client's ETag for nothing. The audit event names the
+  changed fields, never their values.
+- **Idempotent state commands** (activate/deactivate, and anything like them) use a
+  conditional `UPDATE ... WHERE <state differs>` and act on the row count, not
+  `@Version`: a caller whose intent is already satisfied gets the no-op, not a
+  conflict.
+
 **Money** — always integer minor units (`amountCents`, `long`). Never floating
 point.
 
@@ -586,7 +605,8 @@ tenant (id varchar(64) PK — slug)
  ├── app_user            (unique tenant_id + email; bcrypt password_hash)
  │    └── app_user_role  (user_id + role; CHECK against the four Role values)
  ├── customer            (unique tenant_id + email; default_payment_method nullable, V12 —
- │                        a provider token, never card data)
+ │                        a provider token, never card data; version bigint, V17 — @Version,
+ │                        exposed as the ETag)
  ├── product             (unique tenant_id + code)
  │    └── plan           (unique tenant_id + code; interval_unit, interval_count, amount_cents, currency, trial_days)
  │         └── plan_entitlement   (unique tenant_id + plan_id + key; value_json jsonb)
@@ -643,12 +663,12 @@ subscription-hub-state skill's Known gaps):
 1. ~~**Error-mapping sweep.**~~ Done: malformed JSON, 405, 415, unknown URLs and
    missing required parameters are 4xx problem+json, not 500. It came first so
    client mistakes don't pollute Observability's server-error metrics.
-2. **Optimistic locking, step A.** `@Version` on `customer` and `tenant`
-   (`bigint NOT NULL DEFAULT 0`: a null version makes Spring Data treat an
-   existing row as new), a 409 handler for the lock failure, and
-   `PUT /api/customers/{id}` with `ETag`/`If-Match`. Customer rather than Plan:
-   invoices read the plan's price at generation time, so a price edit would
-   reprice every subscriber's unbilled period.
+2. ~~**Optimistic locking, step A.**~~ Done: `PUT /api/customers/{id}` with
+   `@Version` exposed as `ETag`/`If-Match` (V17). Customer rather than Plan,
+   because invoices read the plan's price at generation time, so a price edit
+   would reprice every subscriber's unbilled period. `tenant` got a conditional
+   UPDATE instead of `@Version`: activation is an idempotent command, and the
+   loser of a race should get the no-op, not a 409.
 3. **Observability** (Actuator, Micrometer, Prometheus, Grafana). Decides who may
    read metrics.
 4. **`spring.jpa.open-in-view` off, plus `@Version` on `subscription`.** Measured

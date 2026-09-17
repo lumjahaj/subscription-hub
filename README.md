@@ -25,7 +25,10 @@ tenants (SaaS customers) from one deployment:
 - **Catalog** — tenants define `Product`s, each with one or more `Plan`s
   (interval, price in cents, currency, trial length), and optional
   `PlanEntitlement`s (feature flags/limits attached to a plan).
-- **Customers** belong to a tenant and subscribe to plans.
+- **Customers** belong to a tenant and subscribe to plans. They are the one
+  editable resource: `PUT /api/customers/{id}` requires the `ETag` from a
+  previous read as `If-Match`, so two concurrent edits cannot silently
+  overwrite each other.
 - **Subscriptions** track lifecycle state (`TRIALING`, `ACTIVE`, `PAST_DUE`,
   `PAUSED`, `CANCELED`) and billing period timestamps, and roll forward
   automatically once a billing period closes.
@@ -183,6 +186,7 @@ erDiagram
         text email
         text name
         varchar default_payment_method "provider token, never card data"
+        bigint version "optimistic lock, exposed as the ETag"
     }
     SUBSCRIPTION {
         uuid id PK
@@ -402,6 +406,11 @@ read takes the tenant explicitly instead.
 
 Errors are returned as RFC 7807 `application/problem+json`, with a `code`
 and a `requestId` (for log correlation) on every error response.
+
+An update without `If-Match` is `428 PRECONDITION_REQUIRED`, and one based on a
+stale `ETag` is `412 PRECONDITION_FAILED`. The rare edit that passes that check
+but loses a race at write time is `409 CONCURRENT_MODIFICATION`. In each case
+the client should re-read and retry.
 
 ---
 
