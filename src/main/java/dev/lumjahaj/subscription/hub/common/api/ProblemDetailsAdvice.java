@@ -6,17 +6,21 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.mapping.PropertyReferenceException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @ControllerAdvice
 public class ProblemDetailsAdvice {
@@ -79,6 +83,42 @@ public class ProblemDetailsAdvice {
         var pd = base(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Validation failed");
         pd.setProperty("details", List.of(ex.getHeaderName() + " header is required"));
         return pd;
+    }
+
+    // A query parameter or path variable that cannot be converted to its
+    // declared type (?customerId=not-a-uuid, ?entityType=NOPE,
+    // /api/subscriptions/123). Spring throws this before the controller runs,
+    // and without a handler the caller's typo was reported as our 500.
+    //
+    // The rejected value is deliberately not echoed back: reflecting raw input
+    // into a response is how an error body becomes an injection vector, and
+    // the parameter name plus the expected shape is enough to fix the request.
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    ProblemDetail handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        var pd = base(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Validation failed");
+        pd.setProperty("details", List.of(describeExpected(ex.getName(), ex.getRequiredType())));
+        return pd;
+    }
+
+    // An unknown ?sort= property. Spring Data resolves the Pageable's sort
+    // against the entity only when the query runs, so this surfaces from the
+    // repository call rather than from argument binding. Its own message names
+    // the entity class (ProductEntity), which is internal, so it is replaced.
+    @ExceptionHandler(PropertyReferenceException.class)
+    ProblemDetail handleUnknownSortProperty(PropertyReferenceException ex) {
+        var pd = base(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Validation failed");
+        pd.setProperty("details", List.of("sort refers to a property that does not exist"));
+        return pd;
+    }
+
+    private static String describeExpected(String parameter, Class<?> requiredType) {
+        if (requiredType != null && requiredType.isEnum()) {
+            return parameter + " must be one of " + Arrays.toString(requiredType.getEnumConstants());
+        }
+        if (requiredType == UUID.class) {
+            return parameter + " must be a UUID";
+        }
+        return parameter + " has an invalid value";
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
