@@ -640,9 +640,9 @@ skill.
 Next, in this order (re-sequenced 2026-09-17; reasoning for each gap is in the
 subscription-hub-state skill's Known gaps):
 
-1. **Error-mapping sweep.** Malformed JSON, 405, 415, unknown URLs and missing
-   required parameters still fall through to the catch-all as 500. Before
-   Observability, or client mistakes pollute the server-error metrics.
+1. ~~**Error-mapping sweep.**~~ Done: malformed JSON, 405, 415, unknown URLs and
+   missing required parameters are 4xx problem+json, not 500. It came first so
+   client mistakes don't pollute Observability's server-error metrics.
 2. **Optimistic locking, step A.** `@Version` on `customer` and `tenant`
    (`bigint NOT NULL DEFAULT 0`: a null version makes Spring Data treat an
    existing row as new), a 409 handler for the lock failure, and

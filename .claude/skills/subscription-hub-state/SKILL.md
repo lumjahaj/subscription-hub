@@ -1043,19 +1043,36 @@ feature module does.
   parameter and the expected shape (an enum's allowed values, "must be a UUID")
   but never echoes the rejected value, and the sort error never names the entity
   class.
-- **The rest of that category is still a 500.** `ProblemDetailsAdvice` does not
-  extend `ResponseEntityExceptionHandler`, and its `@ExceptionHandler(Exception.class)`
-  catch-all runs before Spring's `DefaultHandlerExceptionResolver`, so Spring MVC's
-  own client-error exceptions become 500 `INTERNAL_ERROR`:
-  - `HttpMessageNotReadableException` (malformed JSON body)
-  - `HttpRequestMethodNotSupportedException` (405)
-  - `HttpMediaTypeNotSupportedException` (415)
-  - `NoResourceFoundException` (unknown URL with a valid token)
-  - `MissingServletRequestParameterException` (latent: no query parameter is
-    required today)
+- ~~The rest of that category was still a 500~~ — closed. The
+  `@ExceptionHandler(Exception.class)` catch-all runs before Spring's
+  `DefaultHandlerExceptionResolver`, so Spring MVC's own client errors all became
+  500 `INTERNAL_ERROR`. `ProblemDetailsAdvice` now maps each one explicitly:
 
-  Found by reading the code, not yet confirmed with a request. Roadmap step 1 in
-  CLAUDE.md §7.
+  | Exception | Status | `code` |
+  |---|---|---|
+  | `HttpMessageNotReadableException` (not JSON, missing body, wrong field type) | 400 | `MALFORMED_REQUEST_BODY` |
+  | `HttpRequestMethodNotSupportedException` | 405, with `Allow` | `METHOD_NOT_ALLOWED` |
+  | `HttpMediaTypeNotSupportedException` | 415 | `UNSUPPORTED_MEDIA_TYPE` |
+  | `NoResourceFoundException` (unknown URL) | 404 | `ENDPOINT_NOT_FOUND` |
+  | `MissingServletRequestParameterException` (latent) | 400 | `VALIDATION_ERROR` |
+
+  `MalformedRequestIntegrationTest` covers the first four through the real request
+  path; `ProblemDetailsAdviceTest` covers the latent one, since no endpoint has a
+  required query parameter.
+  - **Not `extends ResponseEntityExceptionHandler`.** It would cover more, but it
+    already handles the validation, header and type-mismatch exceptions mapped
+    here, so the two would clash at startup unless those handlers were rewritten
+    as overrides.
+  - **A body error is not `VALIDATION_ERROR`:** validation never ran, because
+    there was no object to validate. A wrong-typed field is named by its JSON path
+    (`amountCents has an invalid value`). Jackson's own message, which quotes the
+    value and names the DTO class, is never returned.
+  - **`ENDPOINT_NOT_FOUND` is not `<TYPE>_NOT_FOUND`:** "no such endpoint" and "no
+    such record" call for different reactions from a client. Only an
+    authenticated caller can get it; an anonymous one still gets 401, so 404
+    cannot be used to map which endpoints exist.
+  - **Still unmapped:** anything else Spring MVC raises before dispatch, e.g. 406
+    for an `Accept` header nothing can produce. Nothing here exercises it.
 
 **Tenant provisioning**
 
