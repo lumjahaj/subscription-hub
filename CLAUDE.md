@@ -487,6 +487,20 @@ subscription-hub-state skill.
   `InvoiceService.generateForCurrentPeriod`, and a PDF failure in the job never
   blocks renewal — a missing PDF is recoverable via `POST /api/invoices/{id}/pdf`,
   a missed invoice is not.
+- **`InvoicePdfService.generatePdf` is three steps around the upload**, not one
+  transaction spanning it: load and render, upload with nothing open, record.
+  It was a single `@Transactional` method, and its javadoc argued that was safe
+  because a storage failure would roll back a transaction that had written
+  nothing. That argument was about rollback and missed a lost update — a payment
+  settling during the slow upload was overwritten when the loaded entity was
+  saved afterwards.
+- **Recording the PDF key writes that column and nothing else.**
+  `attachPdfObjectKeyIfAbsent` is a conditional UPDATE, so `status` and `paid_at`
+  can never be collateral damage from a stale read. An invoice is *not* immutable
+  once issued — `status`, `paid_at` and `pdf_object_key` are all written later —
+  and assuming otherwise is what left it the one financial row with neither
+  `@Version` nor compare-and-set. Any new write to an invoice names its columns
+  the same way.
 - **Invoice PDFs stream through the API, never a presigned URL.** Downloads must
   stay inside the tenant-scoped request path; object keys are storage layout, not
   a security boundary, and never appear in a response.

@@ -230,11 +230,13 @@ description: What is built in Subscription Hub, why each decision was made, and 
   - Generation is deliberately *not* folded into
     `InvoiceService.generateForCurrentPeriod`: that would put a remote call
     inside the billing transaction and let a storage outage fail a revenue
-    path. `InvoicePdfService.generatePdf` does hold a transaction across the
-    upload, which is the same shape — the difference is that there the upload
-    was an unrelated side effect, whereas here storing the bytes *is* the
-    operation, and the render/upload happen before the entity is mutated so a
-    failure rolls back a transaction that wrote nothing.
+    path. `InvoicePdfService.generatePdf` **used to** hold a transaction across
+    the upload itself, excused on the grounds that storing the bytes *is* the
+    operation and a failure would roll back a transaction that had written
+    nothing. That excuse was about rollback only, and it hid a lost update —
+    see "Invoice PDF lost update" below. It is now the same three-step split as
+    `PaymentService`: load and render, upload with no transaction open, record
+    the key with a conditional UPDATE.
   - `InvoiceResponse.pdfAvailable` is a boolean, not the object key: the key is
     internal storage layout and is tenant-prefixed, so exposing it would leak
     both where bytes live and the tenant id that never appears in a body.
@@ -968,6 +970,63 @@ description: What is built in Subscription Hub, why each decision was made, and 
     job correctly refused to guess at and which pushed `PaymentStuckPending` to
     pending — the alert proving itself on data nobody planted.
 
+- **Invoice PDF lost update** — a `fix`, and the only bug in this project so far
+  that was destroying committed financial state rather than merely risking it.
+  - **Symptom, seen live:** an invoice with a `SUCCEEDED` payment against it and
+    `INVOICE_PAID` in the audit log sat at `status = OPEN, paid_at = NULL`. The
+    customer had paid and the invoice looked unpaid, so dunning would collect it
+    again — a double charge.
+  - **Cause:** `InvoicePdfService.generatePdf` was one `@Transactional` method
+    that loaded the invoice, rendered, **uploaded to the object store**, then set
+    `pdfObjectKey` on the loaded entity and saved it. Hibernate writes every
+    column of a dirty entity from the snapshot it loaded, so a payment settling
+    during the slow upload was overwritten by the stale `OPEN`/`NULL` values when
+    the PDF transaction committed second. The row proved the ordering:
+    `pdf_object_key` set, `updated_at` later than the settlement, `paid_at` null.
+  - **The reasoning that hid it.** The method's javadoc explicitly defended
+    holding a transaction across the upload: storing the bytes *is* the
+    operation, and a storage failure would roll back a transaction that had
+    written nothing. That is true and entirely about rollback. It says nothing
+    about what else might commit during the window, which is the actual risk of
+    a long transaction.
+  - **Why invoice alone was unprotected.** Subscriptions got compare-and-set,
+    customer got `@Version`, tenant got a conditional UPDATE. Invoice got none,
+    on the documented belief that it is "immutable once issued" — but `status`,
+    `paid_at` and `pdf_object_key` are all written after issue. The belief, not
+    an oversight, is what left the gap.
+  - **Fix:** the same three-step split as `PaymentService` — load and render in a
+    short read-only transaction (rendering is local CPU work and needs the lazy
+    associations), upload with nothing open, then record through
+    `InvoiceRepository.attachPdfObjectKeyIfAbsent`, a conditional UPDATE naming
+    one column. `status` and `paid_at` are now untouchable from this path however
+    stale the caller's view. The `pdf_object_key is null` guard also makes
+    concurrent generation idempotent: one caller wins, the other gets the
+    existing 409 rather than both claiming success.
+  - **All three callers were exposed, and all three are fixed by the one change.**
+    `NotificationDeliveryService` (self-healing a missing PDF at delivery) is
+    where it was seen, but `BillingCycleJob.generatePdfSafely` uploads in the
+    same way right after invoicing, and so does the `POST /api/invoices/{id}/pdf`
+    endpoint; a payment settling during any of those uploads hit the same window.
+  - **Only a live run could find it.** `notification.relay.delay` is parked at a
+    day in `AbstractIntegrationTest`, so no test ever generated a PDF while a
+    payment settled. It surfaced during the payment-recovered email's manual
+    check, when the SQS listener self-healed a missing PDF in the two seconds
+    between a declined payment and a successful one. The third such find after
+    the SQS record payload and the `job` label — all three from running the app,
+    none from a green suite.
+  - **`InvoicePdfRaceIntegrationTest` forces the race** the way
+    `SubscriptionTransitionRaceIntegrationTest` does: a transaction reads the
+    invoice, another connection commits the settlement, the key is recorded from
+    inside the stale transaction. Unlike the subscription race tests, this one
+    was **demonstrated to fail against the old code** — reverting the adapter to
+    load-modify-save reproduces exactly the live symptom, `expected "PAID" but
+    was "OPEN"`.
+  - `PaymentIntegrationTest.pay_afterADecline_canBeRetriedWithANewKeyAndSucceed`
+    covered this exact sequence but asserted only the payment statuses, never the
+    invoice. The missing assertion is now there. It passes either way — it takes
+    the forced race to catch the bug — but a succeeded payment's invoice is worth
+    asserting wherever it is claimed.
+
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -1172,10 +1231,14 @@ feature module does.
   `PAID`. `DRAFT`, `VOID` and `UNCOLLECTIBLE` remain declared and unreachable,
   still deliberately: `VOID` needs a cancellation path and `UNCOLLECTIBLE`
   belongs to dunning.
-- No update or delete on invoices either, same as everywhere else — an
-  invoice is additionally meant to be immutable once issued (see Current state), so
-  "no update" here is a stronger property than the same gap on Product/
-  Plan/Customer/Subscription, not just an unaddressed one.
+- No update or delete on invoices either, same as everywhere else. An invoice is
+  often described here as "immutable once issued", and that is true only of what
+  a *client* can change: internally `status`, `paid_at` and `pdf_object_key` are
+  all written after issue, by settlement, dunning and PDF generation. Taking the
+  slogan literally is what left invoice the one financial row with neither
+  `@Version` nor compare-and-set, and cost a paid invoice its status (see
+  "Invoice PDF lost update"). The remaining writers are narrow and each names its
+  columns; a new one must do the same rather than save a loaded entity.
 
 **Invoice PDFs**
 
