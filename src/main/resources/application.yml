@@ -95,6 +95,17 @@ payment:
   # fake: in-process, no network or secrets - the default, and what tests use.
   # stripe: the real API, which additionally needs stripe.secret-key below.
   provider: fake
+  reconciliation:
+    # Offset again from billing (:00) and dunning (:15), so the three jobs
+    # never overlap on the same invoice.
+    cron: ${PAYMENT_RECONCILIATION_CRON:0 30 * * * *}
+    # How long a payment may sit PENDING before we go and ask the provider
+    # about it. Below this it is simply mid-flight: a webhook is normally
+    # seconds away, and reconciling then would race the path that works.
+    min-age: 15m
+    # Payments asked about per tenant per run. A provider outage can strand a
+    # whole run's worth at once, and each one costs a call.
+    batch-size: 100
 
 dunning:
   cycle:

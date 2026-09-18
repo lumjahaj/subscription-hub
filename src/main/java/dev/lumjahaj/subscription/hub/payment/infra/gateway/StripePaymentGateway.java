@@ -6,8 +6,10 @@ import com.stripe.exception.StripeException;
 import com.stripe.model.PaymentIntent;
 import com.stripe.net.RequestOptions;
 import com.stripe.param.PaymentIntentCreateParams;
+import dev.lumjahaj.subscription.hub.payment.domain.PaymentEvent;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentGateway;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentGatewayException;
+import dev.lumjahaj.subscription.hub.payment.domain.PaymentLookup;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +17,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.Locale;
+import java.util.Optional;
 
 /**
  * The real provider, selected with {@code payment.provider=stripe}.
@@ -50,15 +53,8 @@ public class StripePaymentGateway implements PaymentGateway {
 
     @Override
     public String createPayment(PaymentRequest request) {
-        RequestOptions options = RequestOptions.builder()
-                // Our payment id. Resubmitting after a timeout returns the
-                // PaymentIntent Stripe already created instead of charging
-                // the customer a second time.
-                .setIdempotencyKey(request.paymentId().toString())
-                .build();
-
         try {
-            PaymentIntent intent = stripe.paymentIntents().create(params(request), options);
+            PaymentIntent intent = stripe.paymentIntents().create(params(request), options(request));
             return intent.getId();
         } catch (CardException declined) {
             // A decline is not a failure to reach Stripe: the PaymentIntent
@@ -83,6 +79,82 @@ public class StripePaymentGateway implements PaymentGateway {
             throw new PaymentGatewayException(
                     "Stripe could not be reached for payment " + request.paymentId(), ex);
         }
+    }
+
+    /**
+     * Retrieves the PaymentIntent when we know its id, and otherwise re-issues
+     * the create under the same idempotency key.
+     *
+     * That second branch is the careful one. A null reference means the create
+     * call never returned, which is not the same as never having happened: a
+     * timeout can arrive after the customer was charged. Stripe's idempotency
+     * layer resolves it for us — the same key returns the original
+     * PaymentIntent if one was created and creates it otherwise, so the
+     * customer is charged exactly once either way. Reading Stripe's search API
+     * instead would avoid the write, but it is eventually consistent and one
+     * more endpoint stripe-mock may not implement, for no extra safety.
+     */
+    @Override
+    public Optional<PaymentEvent> reconcile(PaymentLookup lookup) {
+        PaymentRequest request = lookup.request();
+        try {
+            PaymentIntent intent = lookup.providerReference() == null
+                    ? stripe.paymentIntents().create(params(request), options(request))
+                    : stripe.paymentIntents().retrieve(lookup.providerReference());
+            return outcomeOf(intent, request);
+        } catch (CardException declined) {
+            // Same reasoning as createPayment: a decline is a real outcome,
+            // not a failure to reach Stripe.
+            String intentId = intentIdOf(declined);
+            if (intentId == null) {
+                throw new PaymentGatewayException("Stripe declined payment "
+                        + request.paymentId() + " without a PaymentIntent", declined);
+            }
+            return Optional.of(event(request, intentId, PaymentEvent.Outcome.FAILED, declined.getCode()));
+        } catch (StripeException ex) {
+            throw new PaymentGatewayException(
+                    "Stripe could not be reached to reconcile payment " + request.paymentId(), ex);
+        }
+    }
+
+    /**
+     * Only a terminal PaymentIntent status is an outcome. A confirm that fails
+     * leaves the intent back at requires_payment_method, which is Stripe's way
+     * of saying "declined, give me another card"; processing and
+     * requires_action are still in flight and are simply asked about again
+     * next run.
+     *
+     * Package-private so it can be unit-tested against constructed
+     * PaymentIntents: stripe-mock answers every request with the same
+     * requires_payment_method fixture, so a container test cannot reach the
+     * other branches.
+     */
+    static Optional<PaymentEvent> outcomeOf(PaymentIntent intent, PaymentRequest request) {
+        return switch (intent.getStatus()) {
+            case "succeeded" -> Optional.of(
+                    event(request, intent.getId(), PaymentEvent.Outcome.SUCCEEDED, null));
+            case "canceled", "requires_payment_method" -> Optional.of(
+                    event(request, intent.getId(), PaymentEvent.Outcome.FAILED, failureCodeOf(intent)));
+            default -> Optional.empty();
+        };
+    }
+
+    private static PaymentEvent event(PaymentRequest request, String reference,
+                                      PaymentEvent.Outcome outcome, String failureCode) {
+        // Stripe issues no event for a reconciliation - we asked, it did not
+        // tell us - so the id is derived from the intent and marked as ours.
+        return new PaymentEvent("stripe_reconcile_" + reference, PROVIDER, request.tenantId(),
+                request.paymentId(), reference, outcome, failureCode);
+    }
+
+    private static String failureCodeOf(PaymentIntent intent) {
+        return intent.getLastPaymentError() == null ? null : intent.getLastPaymentError().getCode();
+    }
+
+    private static RequestOptions options(PaymentRequest request) {
+        return RequestOptions.builder()
+                .setIdempotencyKey(request.paymentId().toString())
+                .build();
     }
 
     private static PaymentIntentCreateParams params(PaymentRequest request) {

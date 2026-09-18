@@ -1,8 +1,11 @@
 package dev.lumjahaj.subscription.hub.payment.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentRepository;
+import dev.lumjahaj.subscription.hub.payment.domain.PaymentStatus;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -40,5 +43,19 @@ public class PaymentRepositoryImpl implements PaymentRepository {
     @Override
     public List<PaymentEntity> findByTenantIdAndInvoiceId(String tenantId, UUID invoiceId) {
         return jpaRepository.findByTenantIdAndInvoiceIdOrderByCreatedAtAsc(tenantId, invoiceId);
+    }
+
+    // PENDING and the page size stay here rather than in the port: which
+    // status counts as unsettled is this adapter's business, and Pageable is
+    // exactly the Spring Data surface the domain contract exists to keep out.
+    @Override
+    public List<PaymentEntity> findPendingOlderThan(String tenantId, Instant cutoff, int limit) {
+        return jpaRepository.findByTenantIdAndStatusAndCreatedAtLessThanOrderByCreatedAtAsc(
+                tenantId, PaymentStatus.PENDING, cutoff, PageRequest.of(0, limit));
+    }
+
+    @Override
+    public double oldestPendingAgeSecondsAcrossActiveTenants() {
+        return jpaRepository.oldestPendingAgeSecondsAcrossActiveTenants();
     }
 }

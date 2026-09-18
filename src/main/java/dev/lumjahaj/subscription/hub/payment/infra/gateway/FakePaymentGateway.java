@@ -4,9 +4,13 @@ import dev.lumjahaj.subscription.hub.payment.domain.PaymentEvent;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentEventHandler;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentGateway;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentGatewayException;
+import dev.lumjahaj.subscription.hub.payment.domain.PaymentLookup;
 import dev.lumjahaj.subscription.hub.payment.domain.PaymentRequest;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
+
+import java.util.Optional;
+import java.util.UUID;
 
 /**
  * The default provider: no network, no account, no secrets, so the app runs
@@ -62,14 +66,53 @@ public class FakePaymentGateway implements PaymentGateway {
             throw new PaymentGatewayException("Fake payment provider is unavailable");
         }
 
-        // Derived from the payment id, which is also the idempotency key:
-        // submitting the same payment twice yields the same reference, as
-        // a real provider honouring the key would.
-        String compactId = request.paymentId().toString().replace("-", "");
-        String reference = "fake_pi_" + compactId;
+        String compactId = compactId(request.paymentId());
+        events.handle(eventFor(request, referenceFor(compactId), "fake_evt_" + compactId));
+        return referenceFor(compactId);
+    }
 
-        events.handle(eventFor(request, reference, "fake_evt_" + compactId));
-        return reference;
+    /**
+     * The fake's provider-side record is a pure function of the request, so
+     * it can answer this without storing anything — the same trick that makes
+     * its references and outcomes deterministic.
+     *
+     * A reference means the create call landed, so the outcome is whatever
+     * the payment method says it is. No reference means it never returned,
+     * and the honest imitation of a real provider is to re-run the create
+     * path: unavailable stays unavailable, and anything else yields the same
+     * reference the first call would have, because the payment id is the
+     * idempotency key.
+     *
+     * The event is returned rather than delivered through the handler the way
+     * {@link #createPayment} delivers it: reconciliation hands it to
+     * settlement itself, and a gateway that settled on the side would be a
+     * second path into the money.
+     */
+    @Override
+    public Optional<PaymentEvent> reconcile(PaymentLookup lookup) {
+        PaymentRequest request = lookup.request();
+        String reference = lookup.providerReference();
+        if (reference == null) {
+            if (PROVIDER_UNAVAILABLE.equals(request.paymentMethod())) {
+                throw new PaymentGatewayException("Fake payment provider is unavailable");
+            }
+            reference = referenceFor(compactId(request.paymentId()));
+        }
+        return Optional.of(eventFor(
+                request, reference, "fake_reconcile_evt_" + compactId(request.paymentId())));
+    }
+
+    private static String compactId(UUID paymentId) {
+        return paymentId.toString().replace("-", "");
+    }
+
+    /**
+     * Derived from the payment id, which is also the idempotency key:
+     * submitting the same payment twice yields the same reference, as a real
+     * provider honouring the key would.
+     */
+    private static String referenceFor(String compactId) {
+        return "fake_pi_" + compactId;
     }
 
     private static PaymentEvent eventFor(PaymentRequest request, String reference, String eventId) {

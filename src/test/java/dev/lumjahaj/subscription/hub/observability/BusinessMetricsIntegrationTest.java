@@ -104,6 +104,10 @@ class BusinessMetricsIntegrationTest extends AbstractIntegrationTest {
                 .contains("notification_outbox_oldest_age_seconds{")
                 .contains("status=\"PENDING\"")
                 .contains("status=\"PUBLISHED\"")
+                // The PaymentStuckPending rule's only input. Like the outbox
+                // gauges it is registered at startup, so it is scrapeable
+                // before anything has gone wrong - which is the point.
+                .contains("payments_pending_oldest_age_seconds")
                 .contains("subscription_renewals_total{")
                 .contains("notification_published_total{");
     }

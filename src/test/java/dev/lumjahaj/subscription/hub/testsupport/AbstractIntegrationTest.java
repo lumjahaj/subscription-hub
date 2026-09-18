@@ -79,6 +79,10 @@ import static org.assertj.core.api.Assertions.assertThat;
         // by its test, and a scheduled run firing mid-assertion would charge
         // an invoice another test is in the middle of checking.
         "dunning.cycle.cron=-",
+        // And again for PaymentReconciliationJob, which would otherwise
+        // settle the deliberately-stuck PENDING payments other tests leave
+        // behind - DunningIntegrationTest parks one on purpose.
+        "payment.reconciliation.cron=-",
         // JwtConfig resolves this eagerly and rejects anything under 32
         // bytes, so without it every context fails to build - the same
         // trap billing.pdf.* hit. A fixed test secret also keeps tokens
