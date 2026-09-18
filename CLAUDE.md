@@ -725,7 +725,9 @@ tenant (id varchar(64) PK — slug)
  │        │                immutable once issued)
  │        └── notification (V14; unique tenant_id + dedup_key — invoice_id nullable, since not
  │                          every notification is about one; html_body/text_body rendered and
- │                          stored at enqueue time; relayed to SQS, delivered over SMTP)
+ │                          stored at enqueue time; relayed to SQS, delivered over SMTP;
+ │                          type is varchar + CHECK, not a Postgres enum, so V19 widens the
+ │                          CHECK rather than doing the NAMED_ENUM dance)
  └── audit_event        (V16 activates it: actor_type + actor_id, entity_type + entity_id
                           NOT NULL, request_id; append-only, no @TenantId — see §4)
 
@@ -753,7 +755,7 @@ usage metering, billing/invoice calculation, invoice PDFs (MinIO),
 JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
 settlement), dunning (automatic collection, retries, `PAST_DUE` →
 `UNCOLLECTIBLE`/`CANCELED`), notifications (transactional outbox → SQS →
-email, invoice-issued/payment-failed/subscription-canceled), tenant
+email, invoice-issued/payment-failed/payment-recovered/subscription-canceled), tenant
 provisioning (platform-admin principal and API), audit events (who changed
 what, in the change's transaction) and payment reconciliation (asking the
 provider about payments no event ever settled) are done — see the

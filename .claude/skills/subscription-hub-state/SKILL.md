@@ -462,11 +462,13 @@ description: What is built in Subscription Hub, why each decision was made, and 
     only. `SmtpNotificationSender` (`notification/infra/mail`) is the one
     adapter allowed to import `jakarta.mail`/`spring-mail`, same containment
     pattern as everything else vendor-shaped in this codebase.
-  - **Three emails today**: invoice issued (with the PDF attached —
+  - **Four emails today**: invoice issued (with the PDF attached —
     `NotificationDeliveryService` generates it first if `BillingCycleJob`
     hasn't yet, self-healing the same way that job already tolerates a
     storage outage), payment failed (dunning's non-final branch, with the
-    schedule's own `nextAttemptAt`), subscription canceled (dunning's
+    schedule's own `nextAttemptAt`), payment recovered (dunning's
+    `onPaymentSucceeded`, and only on a real PAST_DUE -> ACTIVE transition —
+    see the Notifications entry below), subscription canceled (dunning's
     `giveUp`). `billing/domain/InvoiceIssuedListener` is a new port,
     implemented by `NotificationService`, so `billing` still never depends
     on `notification` — the same `PaymentOutcomeListener` shape payment
@@ -1265,11 +1267,18 @@ feature module does.
 
 **Notifications**
 
-- **No recovery email.** A payment that succeeds after `PAST_DUE` silently
-  returns the subscription to `ACTIVE` (`DunningService.onPaymentSucceeded`)
-  with nothing sent to the customer. Adding it is a fourth `EmailTemplate`
-  and an `enqueuePaymentRecovered` call in the same place, not a design
-  change.
+- ~~No recovery email~~ — closed. `enqueuePaymentRecovered` sends the other
+  half of the payment-failed email. Two things the old note underestimated:
+  it needed a **migration** as well (V19 widens `notification_type_check`,
+  since `notification.type` is varchar + CHECK, not a Postgres enum), and the
+  trigger is not "a dunning row exists". It fires only on a real
+  `PAST_DUE` -> `ACTIVE` transition, because `startAttempt` creates a dunning
+  row *before* calling the provider: a first attempt that simply succeeds has
+  a row and a recovery counter, yet the customer was never told anything had
+  failed, and "your subscription is active again" would also be false if a
+  pause or cancellation had refused the transition. Pinned in both directions
+  by `DunningNotificationIntegrationTest`. The attempt count is deliberately
+  kept out of the model — how often we retried their card is our business.
 - **The relay is single-instance**, the same assumption `BillingCycleJob`
   and `DunningJob` already make: `NotificationRelayJob` claims `PENDING`
   rows with a plain `SELECT`, not `FOR UPDATE SKIP LOCKED`, so two
