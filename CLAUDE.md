@@ -228,11 +228,12 @@ in depth: the structural backstop only covers Hibernate-mediated queries, not
 a native/`nativeQuery = true` one. There are now two tenant-scoped ones —
 `UsageCounterJpaRepository.upsertAndIncrement` and
 `InvoiceJpaRepository.allocateNextNumber` (see Current state in the subscription-hub-state skill) — and `tenantId` is bound
-explicitly in both for exactly this reason. A third,
-`NotificationJpaRepository.oldestAgeSecondsAcrossActiveTenants`, is cross-tenant
-*on purpose*: it feeds the outbox-age gauge during a metrics scrape, which has no
-tenant, and returns one aggregate number and no rows. A new native query must be
-one of those two kinds, and say which.
+explicitly in both for exactly this reason. Two more are cross-tenant *on
+purpose*, because each feeds a gauge during a metrics scrape, which has no
+tenant, and returns one aggregate number and no rows:
+`NotificationJpaRepository.oldestAgeSecondsAcrossActiveTenants` (outbox age) and
+`PaymentJpaRepository.oldestPendingAgeSecondsAcrossActiveTenants` (stuck
+payments). A new native query must be one of those two kinds, and say which.
 
 **`spring.jpa.open-in-view` is off, and must stay off.** Hibernate resolves
 `@TenantId` *when a session opens*. With open-in-view the session opened at the
@@ -501,15 +502,33 @@ Full reasoning under Current state in the subscription-hub-state skill.
   record in a second.
 - **Idempotency is the caller's key plus a partial unique index.** The
   `Idempotency-Key` header is required, is passed to the provider as our payment
-  id, and is the only way to resume a payment the provider never acknowledged.
-  `ux_payment_invoice_in_flight_or_succeeded` allows one PENDING-or-SUCCEEDED
-  payment per invoice — the thing that actually prevents a double charge.
+  id, and is the only way a caller can resume a payment the provider never
+  acknowledged. `ux_payment_invoice_in_flight_or_succeeded` allows one
+  PENDING-or-SUCCEEDED payment per invoice — the thing that actually prevents a
+  double charge, and the reason a stuck PENDING payment blocks its invoice.
 - **Settlement is idempotent by state, not by remembering event ids.** Only a
   PENDING payment settles, so redelivered, duplicated and out-of-order events are
   no-ops. Providers guarantee none of those three.
 - **A decline is not a provider outage.** A declined card still produced a real
   payment at the provider, so the adapter records the reference and lets the
   event settle it FAILED; only an unreachable provider leaves a payment PENDING.
+- **Reconciliation discovers outcomes; it never applies them.**
+  `PaymentReconciliationJob` asks the provider about payments PENDING past
+  `payment.reconciliation.min-age` and feeds what it learns to
+  `PaymentSettlementService` as an ordinary `PaymentEvent`. Polling is the
+  backstop, not the mechanism: the webhook still settles virtually everything.
+  Anything that makes reconciliation write a payment or an invoice directly is
+  the second settlement path the first invariant exists to forbid.
+- **It never abandons a payment it could not ask about.** "The provider is
+  unreachable, so mark it FAILED and free the slot" is a double-charge bug: a
+  create can time out *after* the card was charged, and releasing the in-flight
+  slot lets dunning retry under a new idempotency key. An unresolvable payment
+  stays PENDING and escalates through `payments.pending.oldest.age` and the
+  `PaymentStuckPending` alert. A human is the correct answer here; a guess is not.
+- **A payment with no `providerReference` is resolved by re-issuing the create
+  under the same idempotency key**, never by assuming it never happened. The key
+  is our payment id, so the provider returns the original payment if one exists
+  and charges exactly once either way — the whole reason the key is mandatory.
 
 **Dunning invariants** — collection is automatic, so the failure modes are
 unattended ones.
@@ -521,6 +540,13 @@ unattended ones.
 - **`dunning/` is its own module because it must be.** `billing` may not depend
   on `payment` (payment already depends on billing, and ArchUnit forbids the
   cycle), and subscription-lifecycle rules do not belong in `payment`.
+- **A skipped invoice is skipped *until something else changes it*.**
+  `startAttempt` returns empty for an invoice with a payment in flight, which is
+  right while a webhook is awaited and permanent if that webhook never comes.
+  Reconciliation is what ends it; before that job existed, one unreachable
+  provider call retired an invoice from collection for good. A settlement that
+  arrives late must not re-count the attempt — `onPaymentFailed` reads the count
+  `startAttempt` already committed and never increments it.
 - **The attempt is counted and committed before the provider is called**, so a
   crash costs one retry rather than leaving the invoice due again immediately —
   which on an hourly cron means charging the customer every hour. The
@@ -690,7 +716,10 @@ tenant (id varchar(64) PK — slug)
  │        │                     paid_at added in V11)
  │        ├── payment      (V11; unique tenant_id + idempotency_key, plus the partial unique index
  │        │                 ux_payment_invoice_in_flight_or_succeeded on (tenant_id, invoice_id)
- │        │                 WHERE status IN ('PENDING','SUCCEEDED') — one charge per invoice)
+ │        │                 WHERE status IN ('PENDING','SUCCEEDED') — one charge per invoice;
+ │        │                 V18 adds idx_payment_pending_created on (tenant_id, created_at)
+ │        │                 WHERE status = 'PENDING', for the reconciliation sweep — partial, so
+ │        │                 it holds only payments still in flight)
  │        ├── dunning_state (V13; unique tenant_id + invoice_id — retry schedule, deleted once
  │        │                the invoice settles; separate from invoice because an invoice is
  │        │                immutable once issued)
@@ -725,9 +754,10 @@ JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
 settlement), dunning (automatic collection, retries, `PAST_DUE` →
 `UNCOLLECTIBLE`/`CANCELED`), notifications (transactional outbox → SQS →
 email, invoice-issued/payment-failed/subscription-canceled), tenant
-provisioning (platform-admin principal and API) and audit events (who changed
-what, in the change's transaction) are done — see the subscription-hub-state
-skill.
+provisioning (platform-admin principal and API), audit events (who changed
+what, in the change's transaction) and payment reconciliation (asking the
+provider about payments no event ever settled) are done — see the
+subscription-hub-state skill.
 
 Next, in this order (re-sequenced 2026-09-17; reasoning for each gap is in the
 subscription-hub-state skill's Known gaps):
@@ -751,8 +781,18 @@ subscription-hub-state skill's Known gaps):
    `@Version` would only have detected conflicts, needing retry logic in five
    places, including inside synchronous fake-gateway settlement.
 
-The re-sequenced roadmap is complete. Deployment (managed free tiers) was parked as
-an undecided idea to revisit now.
+The re-sequenced roadmap is complete. Payment reconciliation (2026-09-18) was
+taken next, ahead of the parked deployment idea and of Postgres RLS: it closed
+the one gap the state skill called "the first thing a real system would add",
+and it was the only candidate that fixed a live defect rather than hardening
+something already correct. Deployment (managed free tiers) remains parked and
+undecided; RLS is still the stronger isolation backstop when it is wanted.
+
+- **Reconciliation was not given an `abandon` path**, though one looked obvious.
+  Freeing a stuck payment's in-flight slot without the provider's confirmation
+  risks a second charge, so the unresolvable case escalates to a human through a
+  gauge and an alert instead. Choosing the alert over the automatic fix is the
+  decision worth being able to defend.
 
 - **Audit events moved after authentication**, and had to. The point of an
   audit log is recording *who* did something, and building it before there was

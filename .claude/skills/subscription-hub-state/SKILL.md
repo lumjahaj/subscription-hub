@@ -571,6 +571,7 @@ description: What is built in Subscription Hub, why each decision was made, and 
   | Renewal + invoicing (`BillingCycleJob`) | skipped | missed periods invoiced |
   | Dunning charges (`DunningJob`) | skipped | open invoices charged |
   | Outbox relay (`NotificationRelayJob`) | skipped, rows stay `PENDING` | published |
+  | Payment reconciliation (`PaymentReconciliationJob`) | skipped, payments stay `PENDING` | asked about and settled |
   | Messages already on SQS | returned to `PENDING`, acknowledged | republished by the relay |
   | Provider webhooks | **still settle** | — |
 
@@ -877,6 +878,94 @@ description: What is built in Subscription Hub, why each decision was made, and 
     - Grafana's datasource health check passes, and the dashboard is provisioned
       under its folder
     - a request log line reads `tenant=acme requestId=...`
+- **Payment reconciliation** — `PaymentReconciliationJob` /
+  `PaymentReconciliationService` (`payment/app`), one new method on
+  `PaymentGateway`, and V18's partial index. Closes the gap this module's
+  Known gaps called "the honest next step ... the first thing a real system
+  would add".
+  - **The bug it fixes is unattended and total, not cosmetic.** A payment left
+    `PENDING` by an unreachable provider holds its invoice's slot in
+    `ux_payment_invoice_in_flight_or_succeeded`, and `DunningService.startAttempt`
+    skips any invoice with a payment in flight. So that invoice was never
+    collected again, never became `UNCOLLECTIBLE`, and its customer was never
+    emailed — and nothing anywhere reported a failure, because nothing failed.
+    The only route back was re-POSTing with the original `Idempotency-Key`, which
+    needs a caller who still has it.
+  - **Polling is the backstop, not the mechanism.** Webhooks still settle
+    virtually everything; this only picks up what delivery dropped. It is the
+    concrete argument for why at-least-once delivery is never sufficient on its
+    own — worth being able to make in an interview.
+  - **One new port method, and no new settlement path.**
+    `PaymentGateway.reconcile(PaymentLookup)` returns
+    `Optional<PaymentEvent>` — present is a terminal outcome, empty is "still in
+    progress, ask again", and `PaymentGatewayException` is "could not ask". What
+    comes back goes to `PaymentSettlementService.handle` like any webhook, so
+    audit (`PAYMENT_SUCCEEDED`/`PAYMENT_FAILED`, `SYSTEM`), `payments.settled`
+    and `DunningService`'s listener are all reached unchanged. "One place settles
+    money" survives intact.
+  - **It never abandons a payment it could not ask about**, and that was the one
+    real design decision. Marking an unreachable payment `FAILED` to free the
+    slot is a double-charge bug: a create can time out *after* the card was
+    charged, and dunning's next attempt uses a **new** idempotency key
+    (`dunning:{invoiceId}:{attempt+1}`). So it stays `PENDING` and escalates to a
+    human through the gauge and alert below. Rejecting the automatic fix in
+    favour of an alert is the defensible choice, not a missing feature.
+  - **A null `providerReference` is resolved by re-issuing the create under the
+    same idempotency key**, not by a search API and not by assuming the create
+    never landed. Stripe returns the original PaymentIntent if one exists and
+    creates it otherwise, so the customer is charged exactly once either way —
+    the whole reason our payment id is the key. Stripe's search API would be
+    read-only but is eventually consistent and one more endpoint `stripe-mock`
+    may not implement, for no extra safety.
+  - **The fake answers it without storing anything**, as a pure function of the
+    request, the same trick that makes its references deterministic: a reference
+    means the create landed, so the outcome is whatever the payment method says;
+    no reference re-runs the create path. It *returns* the event rather than
+    delivering it through the handler the way `createPayment` does — a gateway
+    that settled on the side would be a second path into the money.
+  - **A late settlement must not re-count a dunning attempt.**
+    `DunningService.onPaymentFailed` reads the count `startAttempt` already
+    committed before the provider was called, so a failure settled hours later
+    schedules the next retry without inflating the attempt number. Pinned by the
+    integration test, since it is the kind of thing a refactor would quietly break.
+  - **`payments.pending.oldest.age`** (`PaymentPendingMetrics`) is the escalation
+    path, mirroring `NotificationOutboxMetrics` exactly: a counter cannot show a
+    stuck payment, because nothing failing looks identical to nothing happening,
+    while the age of the oldest one grows without bound. Read from the database
+    on each scrape rather than cached by the job, so it stays honest precisely
+    when the job is what stopped. Backed by the fourth native query,
+    cross-tenant on purpose (a scrape has no tenant) — `PENDING` is written
+    literally rather than bound, because `payment.status` is a Postgres enum and
+    a bound string would need an explicit cast. `payments.reconciled{outcome,
+    provider}` counts what only settled because we asked, which is the health of
+    the webhook path — a dimension `payments.settled` cannot carry.
+  - **V18 is an index and nothing else.** No new column, no new
+    `PaymentStatus` value, no new audit event type: a reconciled payment is
+    `SUCCEEDED` or `FAILED` like any other. `idx_payment_pending_created` is
+    partial on `PENDING`, so it holds only payments still in flight rather than
+    growing with every payment ever made.
+  - **Tests build every fixture from a real stuck payment** — paying with
+    `pm_fake_provider_unavailable` leaves exactly what an unreachable provider
+    leaves — and then edit only what time and a recovered provider would have
+    changed. One test walks the whole defect: dunning strands a payment, a second
+    dunning run does nothing at all, reconciliation clears it, and dunning
+    collects. `stripe-mock` answers every request with the same
+    `requires_payment_method` fixture, so the status mapping is unit-tested
+    against constructed `PaymentIntent`s (`outcomeOf` is package-private for
+    this) and the container proves only that the retrieve and re-create calls
+    are wired.
+  - **Verified live as well as in tests**, which is where this project's last two
+    surprises came from. Against a real `spring-boot:run`: V18 applied
+    out-of-order under `dev`; the six-field cron parsed from
+    `PAYMENT_RECONCILIATION_CRON`; a stranded payment settled and its invoice
+    went `PAID`; and a live scrape showed
+    `jobs_last_success_seconds{scheduled_job="payment-reconciliation"}`,
+    `payments_pending_oldest_age_seconds` and `payments_reconciled_total` with no
+    reserved label names. The run also turned up **two genuinely stuck payments
+    already sitting in the dev database** from earlier manual testing, which the
+    job correctly refused to guess at and which pushed `PaymentStuckPending` to
+    pending — the alert proving itself on data nobody planted.
+
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -1115,14 +1204,12 @@ feature module does.
 
 - ~~Nothing charges automatically~~ — closed by dunning (see Current state), along
   with the missing stored payment method.
-- **A stuck `PENDING` payment blocks its invoice, and nothing cleans it up.** If
-  the provider is unreachable (or the app dies between the reserve and the
-  provider call), the payment stays `PENDING` and the partial unique index refuses
-  every other attempt on that invoice. Retrying with the same `Idempotency-Key`
-  resumes it — that is why the header is mandatory — but a caller who loses the key
-  has no route back, and there is no reconciliation job that asks the provider what
-  happened to old pending payments. That job is the honest next step for this
-  module, and the first thing a real system would add.
+- ~~A stuck `PENDING` payment blocks its invoice, and nothing cleans it up~~ —
+  closed by Payment reconciliation (see Current state). What remains is
+  deliberate: a payment whose provider cannot be reached at all is still never
+  resolved automatically, because freeing its slot without the provider's word
+  risks a second charge. It escalates through `payments.pending.oldest.age` and
+  the `PaymentStuckPending` alert, and a human clears it.
 - **Nothing charges automatically.** `BillingCycleJob` invoices and renews but
   never pays, and `customer` has no stored payment method — the method comes from
   the request body. Both arrive with dunning, which needs to retry on its own.
