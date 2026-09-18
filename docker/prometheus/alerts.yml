@@ -53,6 +53,25 @@ groups:
         annotations:
           summary: NotificationRelayJob has not completed a run in ten minutes
 
+      - alert: PaymentReconciliationStale
+        expr: time() - jobs_last_success_seconds{scheduled_job="payment-reconciliation"} > 2 * 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: PaymentReconciliationJob has not completed a run in over two hours
+
+      - alert: PaymentStuckPending
+        # A payment reconciliation could not resolve: the provider is
+        # unreachable, so its outcome is deliberately not guessed at. It holds
+        # its invoice's in-flight slot, which means dunning skips that invoice
+        # entirely until a human sorts it out. Nothing else will notice.
+        expr: payments_pending_oldest_age_seconds > 3 * 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: A payment has awaited its outcome for over three hours and is blocking its invoice
+
       - alert: JobItemsFailing
         expr: sum by (scheduled_job, step) (increase(jobs_item_failures_total[1h])) > 0
         labels:
