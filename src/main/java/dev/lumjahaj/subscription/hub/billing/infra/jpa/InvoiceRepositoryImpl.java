@@ -2,6 +2,7 @@ package dev.lumjahaj.subscription.hub.billing.infra.jpa;
 
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceRepository;
 import dev.lumjahaj.subscription.hub.billing.domain.InvoiceStatus;
+import jakarta.persistence.EntityManager;
 import org.hibernate.Hibernate;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -17,9 +18,11 @@ import java.util.UUID;
 public class InvoiceRepositoryImpl implements InvoiceRepository {
 
     private final InvoiceJpaRepository jpaRepository;
+    private final EntityManager entityManager;
 
-    public InvoiceRepositoryImpl(InvoiceJpaRepository jpaRepository) {
+    public InvoiceRepositoryImpl(InvoiceJpaRepository jpaRepository, EntityManager entityManager) {
         this.jpaRepository = jpaRepository;
+        this.entityManager = entityManager;
     }
 
     @Override
@@ -73,6 +76,25 @@ public class InvoiceRepositoryImpl implements InvoiceRepository {
     private static Page<InvoiceEntity> withLinesLoaded(Page<InvoiceEntity> page) {
         page.forEach(invoice -> Hibernate.initialize(invoice.getLines()));
         return page;
+    }
+
+    /**
+     * A bulk UPDATE bypasses the persistence context, so an invoice the caller
+     * already holds keeps the old key. Refreshed here after a change, the same
+     * way SubscriptionRepositoryImpl does after its conditional updates, so the
+     * caller's instance and the response mapped from it show what was written.
+     */
+    @Override
+    public boolean attachPdfObjectKeyIfAbsent(String tenantId, UUID invoiceId, String objectKey) {
+        boolean changed = jpaRepository.attachPdfObjectKeyIfAbsent(
+                tenantId, invoiceId, objectKey, Instant.now()) == 1;
+        if (changed) {
+            InvoiceEntity loaded = entityManager.find(InvoiceEntity.class, invoiceId);
+            if (loaded != null) {
+                entityManager.refresh(loaded);
+            }
+        }
+        return changed;
     }
 
     @Override

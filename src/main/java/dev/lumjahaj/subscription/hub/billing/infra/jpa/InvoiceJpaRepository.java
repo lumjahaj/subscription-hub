@@ -4,6 +4,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -27,6 +28,36 @@ public interface InvoiceJpaRepository extends JpaRepository<InvoiceEntity, UUID>
     List<InvoiceEntity> findByTenantIdAndStatus(String tenantId, InvoiceStatus status);
 
     Page<InvoiceEntity> findByTenantIdAndSubscriptionId(String tenantId, UUID subscriptionId, Pageable pageable);
+
+    /**
+     * Records where an invoice's PDF was stored, and touches nothing else.
+     *
+     * A targeted UPDATE rather than setting the field on a loaded entity and
+     * saving it, for the same reason subscriptions changed to compare-and-set:
+     * Hibernate writes every column of a dirty entity at commit, from the
+     * snapshot it loaded. Because generatePdf loads the invoice, then makes a
+     * slow remote call to the object store, a payment can settle in that
+     * window - and saving the entity afterwards wrote the stale OPEN status
+     * back over it, reverting a PAID invoice and its paid_at. That is money:
+     * the invoice is collected again by dunning. Here the statement names one
+     * column, so status and paid_at cannot be collateral damage however stale
+     * the caller's view is.
+     *
+     * The {@code pdfObjectKey is null} guard makes it idempotent too: of two
+     * concurrent generations only one changes a row, and the loser is told the
+     * PDF already exists instead of both silently claiming success.
+     *
+     * No clearAutomatically, matching SubscriptionJpaRepository: the caller
+     * re-reads through the adapter, which refreshes just this invoice.
+     */
+    @Modifying(flushAutomatically = true)
+    @Query("""
+            update InvoiceEntity i
+               set i.pdfObjectKey = :objectKey, i.updatedAt = :now
+             where i.tenantId = :tenantId and i.id = :id and i.pdfObjectKey is null
+            """)
+    int attachPdfObjectKeyIfAbsent(@Param("tenantId") String tenantId, @Param("id") UUID id,
+                                   @Param("objectKey") String objectKey, @Param("now") Instant now);
 
     /**
      * The project's second native/nativeQuery = true query, for the same

@@ -106,6 +106,12 @@ class PaymentIntegrationTest extends AbstractIntegrationTest {
         assertThat(retry.getBody().status()).isEqualTo(PaymentStatus.SUCCEEDED);
         assertThat(listPayments(invoice.id())).extracting(PaymentResponse::status)
                 .containsExactly(PaymentStatus.FAILED, PaymentStatus.SUCCEEDED);
+        // The invoice, not just the payment: a succeeded payment that leaves
+        // its invoice OPEN is unbilled revenue, and asserting only the payment
+        // statuses is what let that hide here.
+        InvoiceResponse paid = getInvoice(invoice.id());
+        assertThat(paid.status().name()).isEqualTo("PAID");
+        assertThat(paid.paidAt()).isNotNull();
     }
 
     @Test

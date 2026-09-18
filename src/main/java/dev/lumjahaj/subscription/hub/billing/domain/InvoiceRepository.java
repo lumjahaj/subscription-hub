@@ -32,5 +32,18 @@ public interface InvoiceRepository {
      * generations for one tenant would read the same max and collide.
      * See InvoiceJpaRepository.allocateNextNumber for the upsert.
      */
+    /**
+     * Records where the invoice's PDF was stored, writing that column and no
+     * other, and only while no key is set yet.
+     *
+     * Narrow on purpose: generatePdf makes a slow remote call between loading
+     * the invoice and recording the key, and saving a loaded entity afterwards
+     * wrote a stale status back over a payment that settled in that window.
+     *
+     * @return true if this call set the key; false if one was already there
+     *         (a concurrent generation won) or the invoice no longer exists
+     */
+    boolean attachPdfObjectKeyIfAbsent(String tenantId, UUID invoiceId, String objectKey);
+
     long allocateNextNumber(String tenantId);
 }
