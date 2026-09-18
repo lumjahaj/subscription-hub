@@ -464,17 +464,23 @@ description: What is built in Subscription Hub, why each decision was made, and 
     only. `SmtpNotificationSender` (`notification/infra/mail`) is the one
     adapter allowed to import `jakarta.mail`/`spring-mail`, same containment
     pattern as everything else vendor-shaped in this codebase.
-  - **Four emails today**: invoice issued (with the PDF attached —
-    `NotificationDeliveryService` generates it first if `BillingCycleJob`
-    hasn't yet, self-healing the same way that job already tolerates a
-    storage outage), payment failed (dunning's non-final branch, with the
-    schedule's own `nextAttemptAt`), payment recovered (dunning's
-    `onPaymentSucceeded`, and only on a real PAST_DUE -> ACTIVE transition —
-    see the Notifications entry below), subscription canceled (dunning's
-    `giveUp`). `billing/domain/InvoiceIssuedListener` is a new port,
-    implemented by `NotificationService`, so `billing` still never depends
-    on `notification` — the same `PaymentOutcomeListener` shape payment
-    already uses for dunning, now used a second time.
+  - **Four emails today**: invoice issued, payment failed (dunning's non-final
+    branch, with the schedule's own `nextAttemptAt`), payment recovered
+    (dunning's `onPaymentSucceeded`, and only on a real PAST_DUE -> ACTIVE
+    transition — see the Notifications entry below), and subscription canceled
+    (dunning's `giveUp`).
+  - **All four carry the invoice PDF**, not just the invoice-issued one.
+    `NotificationDeliveryService` attaches it to any notification whose row has
+    an `invoice_id`, which today is all of them, and generates it first if
+    `BillingCycleJob` has not yet — self-healing the same way that job already
+    tolerates a storage outage. Attaching the invoice to the emails *about* that
+    invoice is reasonable, but it is a property of the dispatcher rather than a
+    per-template choice: a future notification type that should not carry the
+    PDF needs the condition to become something narrower than "has an invoice".
+  - `billing/domain/InvoiceIssuedListener` is a port implemented by
+    `NotificationService`, so `billing` still never depends on `notification` —
+    the same `PaymentOutcomeListener` shape payment already uses for dunning,
+    used a second time.
   - **Deduplication is a caller-checked existence test backed by
     `uk_notification_tenant_dedup_key`** (`{type}:{invoiceId}[:{attempt}]`),
     the same two-layer idempotency shape as invoice generation
