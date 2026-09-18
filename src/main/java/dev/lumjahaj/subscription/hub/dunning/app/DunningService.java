@@ -118,6 +118,12 @@ public class DunningService implements PaymentOutcomeListener {
                                 Map.of("invoiceId", invoiceId));
                         log.info("Subscription {} recovered from PAST_DUE after invoice {} was paid",
                                 subscription.getId(), invoice.getNumber());
+                        // Here rather than beside the recovery counter above:
+                        // only a real PAST_DUE -> ACTIVE transition means the
+                        // customer had been told something was wrong. A first
+                        // attempt that simply succeeds has a dunning row too,
+                        // and nobody was ever emailed about it.
+                        notificationService.enqueuePaymentRecovered(invoice);
                     });
         });
     }

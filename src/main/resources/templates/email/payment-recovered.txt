@@ -1,0 +1,10 @@
+Hi [[${customerName}]],
+
+Good news - we've received your payment for invoice [[${invoiceNumber}]]
+([[${amount}]] [[${currency}]]).
+
+Your subscription is active again, and there's nothing further you need to
+do. Thank you.
+
+--
+This is an automated message - please do not reply to this email.

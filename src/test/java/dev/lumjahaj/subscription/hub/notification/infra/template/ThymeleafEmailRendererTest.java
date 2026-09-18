@@ -48,6 +48,26 @@ class ThymeleafEmailRendererTest {
     }
 
     @Test
+    void rendersThePaymentRecoveredEmail_withoutLeakingTheAttemptCount() {
+        EmailContent content = renderer.render(EmailTemplate.PAYMENT_RECOVERED, Map.of(
+                "subject", "We've received your payment for invoice INV-000005",
+                "customerName", "Jane Doe",
+                "invoiceNumber", "INV-000005",
+                "amount", "29.99",
+                "currency", "USD"
+        ));
+
+        assertThat(content.subject()).isEqualTo("We've received your payment for invoice INV-000005");
+        assertThat(content.html()).contains("Jane Doe", "INV-000005", "29.99", "USD");
+        assertThat(content.text()).contains("Jane Doe", "INV-000005", "29.99", "USD");
+        assertThat(content.text()).doesNotContain("<", ">");
+        // How many times we tried their card is operational detail, and the
+        // model deliberately never carries it.
+        assertThat(content.html()).doesNotContainIgnoringCase("attempt");
+        assertThat(content.text()).doesNotContainIgnoringCase("attempt");
+    }
+
+    @Test
     void aCustomerNameWithMarkup_comesOutEscapedInTheHtmlBody() {
         EmailContent content = renderer.render(EmailTemplate.SUBSCRIPTION_CANCELED, Map.of(
                 "subject", "Your subscription has been canceled",

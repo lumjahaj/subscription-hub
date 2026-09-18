@@ -25,22 +25,28 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 /**
- * Dunning's two emails, through the real transport (outbox -> relay ->
- * ElasticMQ -> listener -> Mailpit), the same shape NotificationIntegrationTest
- * proves for the invoice-issued email - kept in its own class because the
- * fixture (a declining payment method) and the job under test (DunningJob)
- * are both different.
+ * Dunning's three emails - retry, cancellation and recovery - through the
+ * real transport (outbox -> relay -> ElasticMQ -> listener -> Mailpit), the
+ * same shape NotificationIntegrationTest proves for the invoice-issued email.
+ * Kept in its own class because the fixture (a declining payment method) and
+ * the job under test (DunningJob) are both different.
+ *
+ * The recovery email is also pinned by what must <em>not</em> happen: a first
+ * attempt that simply succeeds has a dunning row but no failure the customer
+ * was ever told about, so it sends nothing.
  */
 class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
 
     private static final String TENANT = "acme";
     private static final String DECLINED = "pm_card_visa_chargeDeclined";
+    private static final String SUCCEEDS = "pm_card_visa";
 
     @Autowired
     private DunningJob dunningJob;
@@ -79,6 +85,51 @@ class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
         assertThat(canceledEmail.path("Text").asText()).contains(invoiceNumber);
     }
 
+    @Test
+    void aRecoveredPayment_emailsTheCustomerThatItWentThrough() {
+        UUID subscriptionId = createActiveSubscription(TENANT);
+        UUID customerId = customerIdFor(subscriptionId);
+        setPaymentMethod(customerId, DECLINED);
+        forcePeriodDue(subscriptionId);
+        UUID invoiceId = generateInvoice(subscriptionId);
+        String invoiceNumber = invoiceNumberFor(subscriptionId);
+
+        dunningJob.run();
+        assertThat(subscriptionStatus(subscriptionId)).isEqualTo("PAST_DUE");
+
+        // The customer fixes their card and the next attempt lands.
+        setPaymentMethod(customerId, SUCCEEDS);
+        makeDue(invoiceId);
+        dunningJob.run();
+        relayJob.run();
+
+        assertThat(subscriptionStatus(subscriptionId)).isEqualTo("ACTIVE");
+        JsonNode recoveredEmail = awaitMessage("We've received your payment for invoice " + invoiceNumber);
+        assertThat(recoveredEmail.path("Text").asText()).contains(invoiceNumber);
+    }
+
+    @Test
+    void aFirstAttemptThatSimplySucceeds_sendsNoRecoveryEmail() {
+        // The trigger is a real PAST_DUE -> ACTIVE transition, not the mere
+        // existence of a dunning row. startAttempt creates one before the
+        // provider is called, so a first attempt that succeeds has a row and
+        // a recovery counter - but the customer was never told anything was
+        // wrong, and telling them they have recovered would be nonsense.
+        UUID subscriptionId = createActiveSubscription(TENANT);
+        setPaymentMethod(customerIdFor(subscriptionId), SUCCEEDS);
+        forcePeriodDue(subscriptionId);
+        UUID invoiceId = generateInvoice(subscriptionId);
+
+        dunningJob.run();
+        relayJob.run();
+
+        assertThat(invoiceStatus(invoiceId)).isEqualTo("PAID");
+        assertThat(subscriptionStatus(subscriptionId)).isEqualTo("ACTIVE");
+        // Asserted against the outbox rather than by waiting for mail that
+        // should never arrive: absence is only provable where it is recorded.
+        assertThat(notificationTypesFor(invoiceId)).containsExactly("INVOICE_ISSUED");
+    }
+
     // ---- polling ----
 
     private JsonNode awaitMessage(String subjectFragment) {
@@ -99,6 +150,21 @@ class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
         jdbcTemplate.update(
                 "UPDATE subscription SET current_period_end = ?, next_renewal = ? WHERE id = ?",
                 Timestamp.from(closedPeriodEnd), Timestamp.from(closedPeriodEnd), subscriptionId);
+    }
+
+    private String subscriptionStatus(UUID subscriptionId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT status::text FROM subscription WHERE id = ?", String.class, subscriptionId);
+    }
+
+    private String invoiceStatus(UUID invoiceId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT status::text FROM invoice WHERE id = ?", String.class, invoiceId);
+    }
+
+    private List<String> notificationTypesFor(UUID invoiceId) {
+        return jdbcTemplate.queryForList(
+                "SELECT type FROM notification WHERE invoice_id = ? ORDER BY created_at", String.class, invoiceId);
     }
 
     private String invoiceNumberFor(UUID subscriptionId) {

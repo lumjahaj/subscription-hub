@@ -113,6 +113,42 @@ public class NotificationService implements InvoiceIssuedListener {
                 customer.getEmail(), EmailTemplate.PAYMENT_FAILED, model, invoice);
     }
 
+    /**
+     * The other half of enqueuePaymentFailed: a customer who was told a
+     * payment failed is told when one finally goes through.
+     *
+     * DunningService calls this only when the subscription actually came back
+     * from PAST_DUE, not merely because a dunning row existed. A first
+     * automatic attempt that succeeds creates a dunning row and sends no
+     * failure email, so triggering on the row would tell a customer their
+     * subscription had recovered from a problem they were never told about —
+     * and "your subscription is active again" would be a lie if a pause or
+     * cancellation had meanwhile refused the transition.
+     *
+     * The attempt count is deliberately not in the model. How many times we
+     * tried the customer's card is our operational detail, not something to
+     * put in front of them.
+     */
+    @Transactional
+    public void enqueuePaymentRecovered(InvoiceEntity invoice) {
+        String tenantId = TenantContext.getTenantId();
+        CustomerEntity customer = invoice.getCustomer();
+        String subject = "We've received your payment for invoice " + invoice.getNumber();
+
+        Map<String, Object> model = new HashMap<>();
+        model.put("subject", subject);
+        model.put("customerName", customer.getName());
+        model.put("invoiceNumber", invoice.getNumber());
+        model.put("amount", formatCents(invoice.getTotalCents()));
+        model.put("currency", invoice.getCurrency());
+
+        // No attempt suffix, unlike payment-failed: an invoice recovers at
+        // most once, because settlement only pays an OPEN invoice and this
+        // one is already PAID by the time we get here.
+        enqueue(tenantId, NotificationType.PAYMENT_RECOVERED, "payment-recovered:" + invoice.getId(),
+                customer.getEmail(), EmailTemplate.PAYMENT_RECOVERED, model, invoice);
+    }
+
     @Transactional
     public void enqueueSubscriptionCanceled(InvoiceEntity invoice) {
         String tenantId = TenantContext.getTenantId();

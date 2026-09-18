@@ -8,6 +8,7 @@ package dev.lumjahaj.subscription.hub.notification.domain;
 public enum EmailTemplate {
     INVOICE_ISSUED("invoice-issued"),
     PAYMENT_FAILED("payment-failed"),
+    PAYMENT_RECOVERED("payment-recovered"),
     SUBSCRIPTION_CANCELED("subscription-canceled");
 
     private final String templateName;

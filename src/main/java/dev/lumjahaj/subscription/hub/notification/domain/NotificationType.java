@@ -9,5 +9,6 @@ package dev.lumjahaj.subscription.hub.notification.domain;
 public enum NotificationType {
     INVOICE_ISSUED,
     PAYMENT_FAILED,
+    PAYMENT_RECOVERED,
     SUBSCRIPTION_CANCELED
 }

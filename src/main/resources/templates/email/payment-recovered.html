@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <title th:text="${subject}">Your payment went through</title>
+</head>
+<body>
+<div th:replace="~{layout.html :: layout(~{::section})}">
+    <section>
+        <p>Hi <span th:text="${customerName}">Customer</span>,</p>
+        <p>
+            Good news — we've received your payment for invoice
+            <strong th:text="${invoiceNumber}">INV-000001</strong>
+            (<span th:text="${amount} + ' ' + ${currency}">0.00 USD</span>).
+        </p>
+        <p>Your subscription is active again, and there's nothing further you
+           need to do. Thank you.</p>
+    </section>
+</div>
+</body>
+</html>
