@@ -494,7 +494,7 @@ This brings up:
 
 | Service        | URL / Port              | Notes                                   |
 |----------------|--------------------------|------------------------------------------|
-| Postgres       | `localhost:5432`         | DB/user/password from `.env`             |
+| Postgres       | `localhost:5432`         | DB/user/password from `.env`. Two roles — see below |
 | pgAdmin        | http://localhost:8081    | Login with `PGADMIN_DEFAULT_EMAIL`/`PASSWORD` from `.env`; add a server with host `postgres` |
 | MinIO (S3 API) | `localhost:9000`         | Used by the app to store invoice PDFs    |
 | MinIO console  | http://localhost:9001    | Login with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` from `.env`; browse stored PDFs under the `invoices` bucket |
@@ -510,6 +510,38 @@ Flyway runs the schema migrations automatically on application startup, and the
 bucket-creation step needed. The `notifications`/`notifications-dlq` queues are
 defined in `docker/elasticmq/elasticmq.conf` and exist as soon as the container
 starts.
+
+**Two database roles.** `POSTGRES_USER` is a superuser, owns the schema, and is
+what Flyway migrates as. The application itself connects as
+`subscription_hub_app`, which is neither a superuser nor the owner and is
+`NOBYPASSRLS`, so the row-level security policies actually apply to it — Postgres
+exempts superusers and table owners from RLS, so an application connecting as the
+owner would be silently unprotected. That role is created by
+`docker/postgres/init/01-app-role.sh`, which the Postgres image runs **only when
+the data directory is first initialised.**
+
+> **Upgrading an existing local database.** If your `postgres_data` volume
+> predates this, the init script will not run, the role will not exist, and the
+> application will stop at startup with a Flyway error naming it. Either recreate
+> the volume:
+>
+> ```bash
+> docker compose down -v && docker compose up -d
+> ```
+>
+> or run the same script by hand, once — it is already mounted in the
+> container, and its environment is already set, so there is no SQL to copy
+> and nothing that can drift from what a fresh database gets:
+>
+> ```bash
+> docker compose exec postgres sh /docker-entrypoint-initdb.d/01-app-role.sh
+> ```
+>
+> On Git Bash prefix that with `MSYS_NO_PATHCONV=1`, or MSYS rewrites the
+> container path into a Windows one and `sh` reports a file that does not
+> exist.
+>
+> A clean clone needs neither — `docker compose up -d` creates it.
 
 ### 2. Run the application
 

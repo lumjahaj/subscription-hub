@@ -110,8 +110,24 @@ public abstract class AbstractIntegrationTest {
     /** Matches the bcrypt hash in db/seed/V9001__seed_dev_users.sql. */
     private static final String SEEDED_PASSWORD = "subscriptionhub";
 
+    /**
+     * The password for the non-superuser role the application connects as.
+     * Only ever used against a throwaway container, so it is a literal here
+     * rather than another thing a contributor has to set up.
+     */
+    protected static final String APP_ROLE_PASSWORD = "test-app-role";
+
+    // Mounted the same way docker-compose.yml mounts it, from the same file,
+    // so the role the tests run against is created by exactly the script a
+    // developer's database uses. The image runs everything in this directory
+    // when the data directory is first initialised, which for a fresh
+    // container is always.
     @ServiceConnection
-    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
+    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine")
+            .withEnv("POSTGRES_APP_PASSWORD", APP_ROLE_PASSWORD)
+            .withCopyFileToContainer(
+                    MountableFile.forHostPath("docker/postgres/init/01-app-role.sh", 0755),
+                    "/docker-entrypoint-initdb.d/01-app-role.sh");
 
     // No @ServiceConnection equivalent: Spring Boot has no S3 auto-configuration
     // to feed connection details into (that lives in Spring Cloud AWS), so the

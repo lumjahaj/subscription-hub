@@ -9,10 +9,16 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      # Read by init/01-app-role.sh, not by Postgres itself.
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Creates the non-superuser role the application connects as. The image
+      # runs everything here once, when the data directory is first
+      # initialised - so an existing postgres_data volume will not pick it up.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
 
   pgadmin:
     # Pinned rather than :latest, same reasoning as minio below: an unpinned
