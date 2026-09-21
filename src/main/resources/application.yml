@@ -3,8 +3,14 @@ spring:
     name: subscription-hub
   datasource:
     url: jdbc:postgresql://localhost:5432/${POSTGRES_DB}
-    username: ${POSTGRES_USER}
-    password: ${POSTGRES_PASSWORD}
+    # Not POSTGRES_USER. That role is a superuser and owns every table, and
+    # Postgres exempts both from row-level security - so the policies would be
+    # in place and protect nothing. This role is neither, and is NOBYPASSRLS.
+    # Its name is fixed because db/migration grants and policies name it; only
+    # the password is configurable. Created by
+    # docker/postgres/init/01-app-role.sh.
+    username: subscription_hub_app
+    password: ${POSTGRES_APP_PASSWORD}
   jpa:
     # Off, so a request holds a Hibernate session - and, under the
     # DELAYED_ACQUISITION_AND_HOLD mode Spring configures, its JDBC connection -
@@ -21,6 +27,20 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
   flyway:
     enabled: true
+    # Migrations run as the schema owner, not as the application's role.
+    #
+    # Without FORCE ROW LEVEL SECURITY the owner is exempt from the policies,
+    # which is exactly what a migration needs: V3's
+    # "UPDATE plan SET interval_unit = ..." rewrites every tenant's rows, and
+    # under the policies it would silently update none. Keeping the two roles
+    # apart is what lets the policies be strict.
+    #
+    # The url is given explicitly rather than left to Boot: with only a user
+    # set, FlywayAutoConfiguration derives a DataSource from the application's
+    # one, which it would first have to unwrap past TenantAwareDataSource.
+    url: ${spring.datasource.url}
+    user: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
     # Schema only. Seed data lives in db/seed and is added to this list by
     # the dev profile below - migrations run in every environment, so
     # anything with a public password must not be reachable from here.

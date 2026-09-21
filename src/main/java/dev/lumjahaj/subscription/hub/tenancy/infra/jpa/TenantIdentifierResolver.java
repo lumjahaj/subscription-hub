@@ -29,12 +29,10 @@ import org.springframework.stereotype.Component;
 @Component
 public class TenantIdentifierResolver implements CurrentTenantIdentifierResolver<String> {
 
-    private static final String NO_TENANT = "__no_tenant__";
-
     @Override
     public String resolveCurrentTenantIdentifier() {
         String tenantId = TenantContext.getTenantId();
-        return tenantId != null ? tenantId : NO_TENANT;
+        return tenantId != null ? tenantId : TenantContext.NO_TENANT;
     }
 
     @Override

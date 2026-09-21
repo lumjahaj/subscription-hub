@@ -9,7 +9,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -117,12 +116,21 @@ public abstract class AbstractIntegrationTest {
      */
     protected static final String APP_ROLE_PASSWORD = "test-app-role";
 
-    // Mounted the same way docker-compose.yml mounts it, from the same file,
+    /** The role the application connects as, matching application.yml. */
+    protected static final String APP_ROLE = "subscription_hub_app";
+
+    // Deliberately NOT @ServiceConnection: that supplies one set of
+    // credentials to both the application and Flyway, and the whole point here
+    // is that they differ. The container's own user is the superuser/owner and
+    // migrates; the application connects as the restricted role, which is the
+    // only way the row-level security policies apply to it at all. Registered
+    // in datasourceProperties() below instead.
+    //
+    // The init script is mounted from the same file docker-compose.yml uses,
     // so the role the tests run against is created by exactly the script a
-    // developer's database uses. The image runs everything in this directory
+    // developer's database gets. The image runs everything in that directory
     // when the data directory is first initialised, which for a fresh
     // container is always.
-    @ServiceConnection
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine")
             .withEnv("POSTGRES_APP_PASSWORD", APP_ROLE_PASSWORD)
             .withCopyFileToContainer(
@@ -165,6 +173,23 @@ public abstract class AbstractIntegrationTest {
         ELASTICMQ.start();
     }
 
+    /**
+     * The two roles, kept apart exactly as they are in application.yml. On the
+     * shared base like every other property here: a subclass-level override
+     * would be a different context-cache key, and with it a second context and
+     * a second set of containers.
+     */
+    @DynamicPropertySource
+    static void datasourceProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        registry.add("spring.datasource.username", () -> APP_ROLE);
+        registry.add("spring.datasource.password", () -> APP_ROLE_PASSWORD);
+
+        registry.add("spring.flyway.url", POSTGRES::getJdbcUrl);
+        registry.add("spring.flyway.user", POSTGRES::getUsername);
+        registry.add("spring.flyway.password", POSTGRES::getPassword);
+    }
+
     @DynamicPropertySource
     static void storageProperties(DynamicPropertyRegistry registry) {
         registry.add("billing.pdf.endpoint", MINIO::getS3URL);
@@ -174,6 +199,16 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.mail.port", () -> MAILPIT.getMappedPort(1025));
         registry.add("spring.cloud.aws.sqs.endpoint",
                 () -> "http://" + ELASTICMQ.getHost() + ":" + ELASTICMQ.getMappedPort(9324));
+    }
+
+    /**
+     * The Postgres container's JDBC URL, for the rare test that needs its own
+     * connection rather than the application's pool — see
+     * TenantConnectionBindingIntegrationTest. Exposed as an accessor rather
+     * than by widening the container field, the same way mailpitApiUrl() is.
+     */
+    protected static String postgresJdbcUrl() {
+        return POSTGRES.getJdbcUrl();
     }
 
     /** The Mailpit container's REST API base URL, for reading delivered mail. */
