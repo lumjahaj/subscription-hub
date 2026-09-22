@@ -30,19 +30,13 @@ public interface PaymentJpaRepository extends JpaRepository<PaymentEntity, UUID>
      * one number and no rows. Contrast upsertAndIncrement and
      * allocateNextNumber, native for atomicity, which bind tenantId by hand.
      *
-     * Age comes from the database's clock, the same one that wrote created_at,
-     * so clock skew between application and database cannot distort it.
-     *
-     * PENDING is written literally rather than bound: payment.status is a
-     * Postgres enum (payment_status, V11), and a bound string parameter would
-     * need an explicit cast here. There is only one status worth gauging.
+     * The aggregate itself lives in a SECURITY DEFINER function (V21), for the
+     * same reason as its notification counterpart: being outside @TenantId
+     * stopped being enough once the row-level security policies applied to
+     * every statement this connection issues, and a gauge that silently reads
+     * 0 is worse than one that fails. The function body runs as the table
+     * owner, and EXECUTE is granted to exactly one role.
      */
-    @Query(value = """
-            select cast(coalesce(extract(epoch from (now() - min(p.created_at))), 0) as double precision)
-              from payment p
-              join tenant t on t.id = p.tenant_id
-             where p.status = 'PENDING'
-               and t.active
-            """, nativeQuery = true)
+    @Query(value = "select payment_oldest_pending_age_seconds()", nativeQuery = true)
     double oldestPendingAgeSecondsAcrossActiveTenants();
 }
