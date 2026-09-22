@@ -48,9 +48,11 @@ tenants (SaaS customers) from one deployment:
 
 - **Dunning** collects automatically. A customer's stored payment method is
   charged once an invoice is issued; a failure marks the subscription
-  `PAST_DUE` and schedules a retry on a lengthening backoff. A later success
-  puts the subscription back to `ACTIVE`; running out of attempts writes the
-  invoice off as `UNCOLLECTIBLE` and cancels the subscription.
+  `PAST_DUE` and schedules a retry on a lengthening backoff. A customer with
+  no stored payment method takes the same path — there is nothing to charge,
+  so the attempt fails immediately and the email asks them to add one. A later
+  success puts the subscription back to `ACTIVE`; running out of attempts
+  writes the invoice off as `UNCOLLECTIBLE` and cancels the subscription.
 - **Notifications** email the customer through a transactional outbox: an
   invoice or a dunning state change writes an outbox row in the same
   transaction, a relay job moves it onto an SQS queue, and a listener sends
@@ -399,11 +401,11 @@ costs one retry instead of re-charging the customer on every tick.
 
 ### Notifications
 
-An invoice being issued and a dunning outcome (payment failed, subscription
-canceled) each write a row to a `notification` outbox table, in the same
-transaction as the change that caused it — publishing to a queue can't be
-part of that same atomic commit (the dual-write problem), so the durable
-half is the row, not the message. A relay job moves `PENDING` rows onto an
+An invoice being issued and a dunning outcome (payment failed, payment
+recovered, payment method required, subscription canceled) each write a row to
+a `notification` outbox table, in the same transaction as the change that
+caused it — publishing to a queue can't be part of that same atomic commit
+(the dual-write problem), so the durable half is the row, not the message. A relay job moves `PENDING` rows onto an
 SQS queue with no transaction open around the publish call, and a listener
 (`@SqsListener`, Spring Cloud AWS) picks the message up, attaches the
 invoice PDF when there is one, and sends the email over SMTP.
