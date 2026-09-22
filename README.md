@@ -565,19 +565,25 @@ the data directory is first initialised.**
 > docker compose down -v && docker compose up -d
 > ```
 >
-> or run the same script by hand, once — it is already mounted in the
-> container, and its environment is already set, so there is no SQL to copy
-> and nothing that can drift from what a fresh database gets:
+> or keep your data and run the same script by hand, once. Add
+> `POSTGRES_APP_PASSWORD` to your `.env` first (it is in `.env.example`), then:
 >
 > ```bash
+> docker compose up -d postgres   # recreates the container: new mount, new env
 > docker compose exec postgres sh /docker-entrypoint-initdb.d/01-app-role.sh
 > ```
 >
-> On Git Bash prefix that with `MSYS_NO_PATHCONV=1`, or MSYS rewrites the
-> container path into a Windows one and `sh` reports a file that does not
-> exist.
+> The first command is not optional and is not destructive: a container started
+> before this change has neither the init directory mounted nor
+> `POSTGRES_APP_PASSWORD` in its environment, so the second would report a file
+> that does not exist. Recreating the container keeps the `postgres_data`
+> volume, so nothing is lost.
 >
-> A clean clone needs neither — `docker compose up -d` creates it.
+> On Git Bash prefix the second command with `MSYS_NO_PATHCONV=1`, or MSYS
+> rewrites the container path into a Windows one and `sh` reports a file that
+> does not exist for a different reason entirely.
+>
+> A clean clone needs none of this — `docker compose up -d` creates the role.
 
 ### 2. Run the application
 
