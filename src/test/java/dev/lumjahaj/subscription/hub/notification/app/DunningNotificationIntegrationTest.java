@@ -71,7 +71,7 @@ class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
         dunningJob.run();
         relayJob.run();
 
-        JsonNode failedEmail = awaitMessage("We couldn't collect payment for invoice " + invoiceNumber);
+        JsonNode failedEmail = awaitMessage("We couldn't collect payment for invoice", invoiceNumber);
         assertThat(failedEmail.path("Text").asText()).contains(invoiceNumber);
 
         // max-attempts is 4 (see AbstractIntegrationTest / application.yml);
@@ -81,7 +81,7 @@ class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
         dunningJob.run();
         relayJob.run();
 
-        JsonNode canceledEmail = awaitMessage("Your subscription has been canceled");
+        JsonNode canceledEmail = awaitMessage("Your subscription has been canceled", invoiceNumber);
         assertThat(canceledEmail.path("Text").asText()).contains(invoiceNumber);
     }
 
@@ -104,7 +104,7 @@ class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
         relayJob.run();
 
         assertThat(subscriptionStatus(subscriptionId)).isEqualTo("ACTIVE");
-        JsonNode recoveredEmail = awaitMessage("We've received your payment for invoice " + invoiceNumber);
+        JsonNode recoveredEmail = awaitMessage("We've received your payment for invoice", invoiceNumber);
         assertThat(recoveredEmail.path("Text").asText()).contains(invoiceNumber);
     }
 
@@ -132,10 +132,18 @@ class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
 
     // ---- polling ----
 
-    private JsonNode awaitMessage(String subjectFragment) {
+    /**
+     * Matched on the invoice number as well as the subject. The mailbox is
+     * shared by the whole JVM and relayJob.run() publishes every active
+     * tenant's PENDING rows, not only this test's, so a subject another test
+     * also produces - "Your subscription has been canceled" names no invoice -
+     * would otherwise match that test's email instead of this one's.
+     */
+    private JsonNode awaitMessage(String subjectFragment, String invoiceNumber) {
         return await().atMost(Duration.ofSeconds(20))
                 .pollInterval(Duration.ofMillis(200))
-                .until(() -> mailpit.findBySubjectContaining(subjectFragment), java.util.Objects::nonNull);
+                .until(() -> mailpit.findBySubjectAndTextContaining(subjectFragment, invoiceNumber),
+                        java.util.Objects::nonNull);
     }
 
     // ---- state helpers (read straight from the database) ----

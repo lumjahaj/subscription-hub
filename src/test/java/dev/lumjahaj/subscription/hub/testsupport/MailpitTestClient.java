@@ -55,6 +55,26 @@ public final class MailpitTestClient {
                 .orElse(null);
     }
 
+    /**
+     * The full message whose subject and text body both contain the given
+     * fragments, or null if none has arrived yet.
+     *
+     * The subject alone does not always identify a message. The cancellation
+     * email names no invoice, and the mailbox is shared by every test in the
+     * JVM - including notifications a different class enqueued, because
+     * NotificationRelayJob claims every active tenant's PENDING rows rather
+     * than only the ones the calling test created. Matching on the invoice
+     * number in the body is what makes such an assertion unambiguous.
+     */
+    public JsonNode findBySubjectAndTextContaining(String subjectFragment, String textFragment) {
+        return listMessages().stream()
+                .filter(summary -> summary.path("Subject").asText("").contains(subjectFragment))
+                .map(summary -> getMessage(summary.path("ID").asText()))
+                .filter(message -> message.path("Text").asText("").contains(textFragment))
+                .findFirst()
+                .orElse(null);
+    }
+
     private JsonNode get(String path) {
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path)).GET().build();
