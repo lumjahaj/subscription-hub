@@ -389,10 +389,11 @@ description: What is built in Subscription Hub, why each decision was made, and 
     already-invoiced path, so nothing new was needed for recovery. After
     `dunning.max-attempts` the invoice is `UNCOLLECTIBLE` and the subscription
     `CANCELED` — which is what finally makes both of those enum values reachable.
-  - **Skips are deliberate and logged, not silent**: an invoice with a `PENDING`
-    payment (an awaited webhook is not a failure, and the in-flight index would
-    reject the attempt anyway), and a customer with no stored payment method
-    (left `OPEN` for a human rather than invented behaviour — see the gaps below).
+  - **One skip remains, and it is deliberate and logged**: an invoice with a
+    `PENDING` payment, since an awaited webhook is not a failure and the
+    in-flight index would reject the attempt anyway. A customer with no stored
+    payment method used to be the second, and became a failure instead — see
+    "Collection without a payment method" below.
   - `DunningSchedule` is pure and unit-tested as a table of attempt → delay, the
     same split `renewalFor` and `InvoiceCalculator` use. Defaults: retries after
     1d, 3d, 5d, four attempts total.
@@ -464,12 +465,14 @@ description: What is built in Subscription Hub, why each decision was made, and 
     only. `SmtpNotificationSender` (`notification/infra/mail`) is the one
     adapter allowed to import `jakarta.mail`/`spring-mail`, same containment
     pattern as everything else vendor-shaped in this codebase.
-  - **Four emails today**: invoice issued, payment failed (dunning's non-final
+  - **Five emails today**: invoice issued, payment failed (dunning's non-final
     branch, with the schedule's own `nextAttemptAt`), payment recovered
     (dunning's `onPaymentSucceeded`, and only on a real PAST_DUE -> ACTIVE
-    transition — see the Notifications entry below), and subscription canceled
+    transition — see the Notifications entry below), payment method required
+    (the same non-final branch for a customer with no card on file — see
+    "Collection without a payment method"), and subscription canceled
     (dunning's `giveUp`).
-  - **All four carry the invoice PDF**, not just the invoice-issued one.
+  - **All five carry the invoice PDF**, not just the invoice-issued one.
     `NotificationDeliveryService` attaches it to any notification whose row has
     an `invoice_id`, which today is all of them, and generates it first if
     `BillingCycleJob` has not yet — self-healing the same way that job already
@@ -1128,6 +1131,87 @@ description: What is built in Subscription Hub, why each decision was made, and 
     reads nothing at all. A fifth test asserts no table with a `tenant_id` column
     lacks a policy, so the next tenant-owned table cannot quietly skip one. All
     were demonstrated to fail with RLS disabled on one table.
+- **Collection without a payment method** (2026-09-22) — V24, a fifth
+  notification type, and one extracted method in `DunningService`. A `feat`,
+  though it reads like a bug fix: the branch it replaces was documented
+  behaviour ("left `OPEN` for a human"), and the defect was that nothing ever
+  told the human.
+  - **The skip was permanent, and it compounded.** `startAttempt` returned
+    empty *before* `dunningStates.save(state)`, so no schedule row was ever
+    written. The invoice was never chased, never emailed and never written
+    off; the subscription stayed `ACTIVE`, so `BillingCycleJob` renewed it and
+    issued **another uncollectable invoice every period, without bound**; and
+    `DunningJob` re-scanned that growing pile every hour, building and
+    discarding a transient state row each time. Nothing failed anywhere, so
+    nothing reported anything — the same shape as the stranded-payment defect
+    reconciliation was built for.
+  - **A missing payment method is a collection failure, not a skip.** From the
+    platform's side it is the same business event as a decline — we could not
+    collect and the customer has to act — and differs only in what we ask them
+    to do. So both now run through one `recordFailure`: count the attempt, give
+    up if exhausted, otherwise `PAST_DUE` and notify. Sharing the path is what
+    guarantees both *end*; this branch was the one violation of the "dunning
+    ends" invariant.
+  - **`PAST_DUE` is the load-bearing part**, not the email. Renewal acts only on
+    `TRIALING`/`ACTIVE` (`SubscriptionRenewalService`), so the transition is
+    what stops the stream of new uncollectable invoices at one. That the
+    failure path already did this, for declines, is why the fix needed no new
+    mechanism.
+  - **Termination is `giveUp` unchanged**: `UNCOLLECTIBLE`, `CANCELED`, the
+    existing cancellation email, on the same `dunning.max-attempts`. Considered
+    and rejected: leaving it `PAST_DUE` forever behind a gauge and an alert
+    (the reconciliation precedent), and writing the invoice off without
+    canceling. Reconciliation's caution is about not taking an **irreversible
+    money action** on incomplete information — a second charge — and none of
+    that applies here: nothing is charged, the information is complete (there
+    is no card), and the customer has been emailed on every attempt in the
+    schedule first, roughly four times over nine days at the defaults.
+  - **`PAYMENT_METHOD_REQUIRED` is its own type, not payment-failed's copy.**
+    "We'll try again, no action is needed if your payment method is up to date"
+    is actively false here: retrying cannot work until the customer acts, and
+    telling them otherwise is how an invoice reaches cancellation with the
+    customer believing it was in hand. Keyed by attempt like payment-failed, so
+    each reminder is sent rather than deduplicated into one.
+  - **Recovery needed no new code.** A customer who adds a payment method is
+    charged at the next due slot, and `onPaymentSucceeded` takes the
+    subscription `PAST_DUE -> ACTIVE` and sends the recovered email. Pinned by
+    a test, because the remedy the email asks for has to actually work.
+  - **No new counter**, per the metrics invariant that business events come
+    from `audit.events`: `SUBSCRIPTION_PAST_DUE` and `INVOICE_UNCOLLECTIBLE`
+    already fire. `SUBSCRIPTION_PAST_DUE` gained a `reason`, and
+    `INVOICE_UNCOLLECTIBLE` a `lastFailure`, which is what separates a card
+    that kept declining from a customer who never stored one — the same status,
+    but only one of the two can be fixed by retrying.
+    `dunning.attempts.started` deliberately does *not* count this case: it
+    measures attempts that cost a provider fee, and this one calls no provider.
+  - **V24 is V19's constraint swap again** — `notification.type` is
+    varchar + CHECK, not a Postgres enum, so widening the vocabulary needs
+    neither a new type nor the `NAMED_ENUM` mapping combo.
+  - Unlike the invoice-PDF race, the old code was not run against the new
+    tests: they assert a `dunning_state` row and a `PAST_DUE` subscription that
+    the old path structurally never produced, so the failure is argued from the
+    code rather than demonstrated.
+  - **Verified live, and the live run is what showed the defect had been
+    accumulating.** With `DUNNING_CYCLE_CRON="*/20 * * * * *"`, the first run
+    swept **eight** invoices into dunning — seven of them left over from
+    earlier manual sessions (`Smoke Customer`, `PDF Customer`, `Outage
+    Customer`, ...), each `OPEN` since the day it was issued with no schedule,
+    no email and nothing anywhere reporting it. The same kind of find as the
+    two genuinely stuck payments reconciliation turned up: the defect was
+    real and compounding in a database nobody had planted it in.
+    Also confirmed in that run: V24 applied out-of-order under `dev` (the
+    schema was at 9002); each invoice got `PAST_DUE` plus a
+    `PAYMENT_METHOD_REQUIRED` email in Mailpit with the invoice PDF attached;
+    one fast-forwarded to its last attempt became `UNCOLLECTIBLE` with the
+    subscription `CANCELED`, its dunning row deleted and **no payment row ever
+    created**; one given a card was charged, went `PAID`/`ACTIVE` and sent the
+    recovery email; the audit rows carried `reason` and `lastFailure`; and the
+    scrape showed `dunning_attempts_started_total` at **1** — the single
+    attempt that actually reached the provider — with the eight
+    no-payment-method attempts visible only through
+    `audit_events_total{type="SUBSCRIPTION_PAST_DUE"}`, which is exactly the
+    split the counter's contract promises.
+
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -1407,13 +1491,19 @@ feature module does.
 - ~~A concurrent pause can be overwritten with `PAST_DUE`~~ — closed, along with
   three siblings found while fixing it. See Current state's "Subscription
   transitions as compare-and-set".
-- **A customer with no stored payment method is never chased, and now never
-  emailed either.** Their invoices stay `OPEN` forever, no dunning row is
-  created, and `DunningService.startAttempt` returns before a notification
-  could be enqueued (there is no dunning state to hang a "payment failed"
-  email off in this branch). Notifications exist now, but this specific
-  path still isn't wired to one; a real system would email the customer to
-  add a payment method, or eventually write the invoice off.
+- ~~**A customer with no stored payment method is never chased, and now never
+  emailed either.**~~ — closed by "Collection without a payment method" (see
+  Current state), which did both things this note proposed: email them to add
+  one, and eventually write the invoice off. It had understated the damage.
+  The invoices did not merely stay `OPEN`: the subscription stayed `ACTIVE`, so
+  renewal kept issuing a fresh uncollectable invoice every period.
+- **Nothing stops a subscription being created for a customer with no payment
+  method.** That is where the above begins, and it is left alone deliberately:
+  a trial, an invoice-by-bank-transfer customer, and a card added between
+  signup and the first invoice are all legitimate, so refusing at creation
+  would be wrong. Dunning now handles the case that reaches it, which is the
+  right layer for it — but nothing warns the tenant earlier, when it is still
+  cheap to fix.
 - ~~Nobody is told anything~~ — closed by Notifications (see Current state):
   invoice-issued, payment-failed and subscription-canceled all email the
   customer now. There is still no recovery/"payment succeeded" email — see

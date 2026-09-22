@@ -611,6 +611,15 @@ unattended ones.
   provider call retired an invoice from collection for good. A settlement that
   arrives late must not re-count the attempt — `onPaymentFailed` reads the count
   `startAttempt` already committed and never increments it.
+- **Every way of failing to collect goes through one path, and so ends.**
+  `recordFailure` is it: count the attempt, give up if exhausted, otherwise
+  `PAST_DUE` and tell the customer. A decline and a customer with no stored
+  payment method are the same business event and differ only in which email is
+  sent. Returning empty for the second — the original behaviour — wrote no
+  dunning row at all, so that invoice was never chased, emailed or written off,
+  and the subscription stayed `ACTIVE` for `BillingCycleJob` to renew into
+  another uncollectable invoice every period. A new "cannot collect" case is a
+  failure code and a template, never an early return.
 - **The attempt is counted and committed before the provider is called**, so a
   crash costs one retry rather than leaving the invoice due again immediately —
   which on an hourly cron means charging the customer every hour. The
@@ -790,8 +799,8 @@ tenant (id varchar(64) PK — slug)
  │        └── notification (V14; unique tenant_id + dedup_key — invoice_id nullable, since not
  │                          every notification is about one; html_body/text_body rendered and
  │                          stored at enqueue time; relayed to SQS, delivered over SMTP;
- │                          type is varchar + CHECK, not a Postgres enum, so V19 widens the
- │                          CHECK rather than doing the NAMED_ENUM dance)
+ │                          type is varchar + CHECK, not a Postgres enum, so V19 and V24
+ │                          widen the CHECK rather than doing the NAMED_ENUM dance)
  └── audit_event        (V16 activates it: actor_type + actor_id, entity_type + entity_id
                           NOT NULL, request_id; append-only, no @TenantId — see §4)
 
@@ -826,7 +835,8 @@ usage metering, billing/invoice calculation, invoice PDFs (MinIO),
 JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
 settlement), dunning (automatic collection, retries, `PAST_DUE` →
 `UNCOLLECTIBLE`/`CANCELED`), notifications (transactional outbox → SQS →
-email, invoice-issued/payment-failed/payment-recovered/subscription-canceled), tenant
+email, invoice-issued/payment-failed/payment-recovered/payment-method-required/
+subscription-canceled), tenant
 provisioning (platform-admin principal and API), audit events (who changed
 what, in the change's transaction) and payment reconciliation (asking the
 provider about payments no event ever settled) are done — see the
