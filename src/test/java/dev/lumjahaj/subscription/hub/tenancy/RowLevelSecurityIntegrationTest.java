@@ -116,13 +116,17 @@ class RowLevelSecurityIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * Guards the list in V22 against the next tenant-owned table.
+     * Guards V22 and V23 against the next tenant-owned table.
      *
      * <p>A migration that adds one with a tenant_id column and no policy
      * leaves it readable across tenants, and nothing else in the suite would
      * notice: every existing test would pass, because correct code scopes by
-     * tenant anyway. The two exceptions are named here so that removing one
-     * from the migration means deliberately editing this list.
+     * tenant anyway.
+     *
+     * <p>There are no exceptions left. app_user and audit_event were the last
+     * two, and they were the ones that mattered — the only tables with no
+     * {@code @TenantId} backstop either, so a single repository method written
+     * without a tenant would have leaked with nothing to catch it.
      */
     @Test
     void everyTenantOwnedTableIsCoveredByAPolicy() {
@@ -142,15 +146,41 @@ class RowLevelSecurityIntegrationTest extends AbstractIntegrationTest {
 
         assertThat(unprotected)
                 .as("a tenant_id column with no row-level security is a table that leaks")
-                .containsExactlyInAnyOrder(
-                        // A login has no tenant in context; reading this table
-                        // is what establishes one. Scoped explicitly by
-                        // findByTenantIdAndEmail until that is closed.
-                        "app_user",
-                        // Platform administrators record events under the
-                        // tenant they act on, from a request with no tenant,
-                        // and the event must commit in that transaction.
-                        "audit_event");
+                .isEmpty();
+    }
+
+    /**
+     * app_user is the table this whole change was most needed for.
+     *
+     * <p>It has no {@code @TenantId} — a login has no tenant in context, since
+     * reading this table is what establishes one — so until now
+     * {@code findByTenantIdAndEmail} was the <i>only</i> thing scoping it, and
+     * a second method written without the tenant would have leaked silently.
+     * Now the database refuses regardless of what the query says.
+     */
+    @Test
+    void aRawQueryCannotReadAnotherTenantsUsers() throws SQLException {
+        // The seeded admins exist under both tenants (db/seed V9001).
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM app_user WHERE email = ?", Integer.class, "admin@acme.test"))
+                .isEqualTo(1);
+
+        assertThat(countUsersByEmail("admin@acme.test", "demo"))
+                .as("demo must not see acme's users through a query that never mentions a tenant")
+                .isZero();
+        assertThat(countUsersByEmail("admin@acme.test", "acme")).isEqualTo(1);
+    }
+
+    private int countUsersByEmail(String email, String tenantId) throws SQLException {
+        try (Connection connection = connectionAs(tenantId);
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT count(*) FROM app_user WHERE email = ?")) {
+            statement.setString(1, email);
+            try (ResultSet rs = statement.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
+        }
     }
 
     private int countProductsById(UUID id, String tenantId) throws SQLException {

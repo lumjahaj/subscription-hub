@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.tenancy.domain;
 
+import java.util.function.Supplier;
+
 public final class TenantContext {
     private static final ThreadLocal<String> CURRENT_TENANT = new ThreadLocal<>();
 
@@ -41,6 +43,29 @@ public final class TenantContext {
         try {
             setTenantId(tenantId);
             action.run();
+        } finally {
+            clear();
+        }
+    }
+
+    /**
+     * runAs for an action that returns something.
+     *
+     * Exists because of where the tenant now has to be set. Hibernate resolves
+     * @TenantId when a session opens, and the database connection is bound to
+     * app.tenant_id when it is borrowed — both of which happen when a
+     * transaction begins. So setting the tenant *inside* a @Transactional
+     * method is too late to affect either: the work is already scoped to
+     * whatever was in context when the method was entered.
+     *
+     * Where a @Transactional service method is itself the entry point — login,
+     * and the platform endpoints that act on a named tenant — the wrapping
+     * therefore has to happen at the caller, and those callers return a value.
+     */
+    public static <T> T callAs(String tenantId, Supplier<T> action) {
+        try {
+            setTenantId(tenantId);
+            return action.get();
         } finally {
             clear();
         }

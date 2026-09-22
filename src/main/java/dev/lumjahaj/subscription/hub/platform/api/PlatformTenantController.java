@@ -13,6 +13,7 @@ import dev.lumjahaj.subscription.hub.platform.api.dto.TenantResponse;
 import dev.lumjahaj.subscription.hub.platform.api.mapper.TenantMapper;
 import dev.lumjahaj.subscription.hub.platform.app.ProvisionedTenant;
 import dev.lumjahaj.subscription.hub.platform.app.TenantProvisioningService;
+import dev.lumjahaj.subscription.hub.tenancy.domain.TenantContext;
 import jakarta.validation.Valid;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.web.PageableDefault;
@@ -56,10 +57,22 @@ public class PlatformTenantController {
         this.auditEventMapper = auditEventMapper;
     }
 
+    /**
+     * Runs as the tenant being created, which is the only way the work can
+     * commit at all now that app_user and audit_event are under row-level
+     * security. A platform request carries no tenant, and both of those rows
+     * name the new one, so without this the WITH CHECK clause refuses them.
+     *
+     * <p>It has to be here rather than inside the service: provision() is the
+     * @Transactional boundary, and the connection is bound to a tenant when
+     * the transaction opens, so setting it inside would already be too late.
+     * That is the general rule this step establishes — see TenantContext.callAs.
+     */
     @PostMapping
     @PreAuthorize(Authorize.PLATFORM_ADMIN)
     public ResponseEntity<TenantProvisionedResponse> create(@Valid @RequestBody TenantCreateRequest request) {
-        ProvisionedTenant provisioned = provisioningService.provision(request);
+        ProvisionedTenant provisioned =
+                TenantContext.callAs(request.id(), () -> provisioningService.provision(request));
         URI location = UriComponentsBuilder.fromPath("/api/platform/tenants/{id}")
                 .buildAndExpand(provisioned.tenant().id())
                 .toUri();
@@ -78,26 +91,34 @@ public class PlatformTenantController {
         return ResponseEntity.ok(TenantMapper.toResponse(provisioningService.get(id)));
     }
 
+    // Both record an audit event under the tenant they act on, so both run as
+    // it, for the same reason create() does.
     @PostMapping("/{id}/deactivate")
     @PreAuthorize(Authorize.PLATFORM_ADMIN)
     public ResponseEntity<TenantResponse> deactivate(@PathVariable String id) {
-        return ResponseEntity.ok(TenantMapper.toResponse(provisioningService.deactivate(id)));
+        return ResponseEntity.ok(TenantMapper.toResponse(
+                TenantContext.callAs(id, () -> provisioningService.deactivate(id))));
     }
 
     @PostMapping("/{id}/activate")
     @PreAuthorize(Authorize.PLATFORM_ADMIN)
     public ResponseEntity<TenantResponse> activate(@PathVariable String id) {
-        return ResponseEntity.ok(TenantMapper.toResponse(provisioningService.activate(id)));
+        return ResponseEntity.ok(TenantMapper.toResponse(
+                TenantContext.callAs(id, () -> provisioningService.activate(id))));
     }
 
     /**
-     * A tenant's whole audit log, as seen from the platform. This needs none
-     * of PaymentWebhookService's session handling, although the request has
-     * no tenant, because audit_event deliberately has no @TenantId (see
-     * AuditEventEntity).
+     * A tenant's whole audit log, as seen from the platform.
      *
-     * An unknown tenant is a 404 rather than an empty page, so a typo in the
-     * id cannot look like a tenant that did nothing.
+     * <p>This used to need no session handling at all, because audit_event has
+     * no @TenantId. Row-level security does not care: its predicate applies to
+     * the connection whatever Hibernate does, so the read runs as the tenant
+     * it is about. Without that it would return an empty page — a tenant whose
+     * history silently looks empty being precisely the failure an audit log
+     * must not have.
+     *
+     * <p>An unknown tenant is a 404 rather than an empty page, so a typo in
+     * the id cannot look like a tenant that did nothing.
      */
     @GetMapping("/{id}/audit-events")
     @PreAuthorize(Authorize.PLATFORM_ADMIN)
@@ -111,7 +132,7 @@ public class PlatformTenantController {
             throw new IncompleteAuditFilterException();
         }
         provisioningService.get(id);
-        var page = auditService.list(id, entityType, entityId, pageable);
+        var page = TenantContext.callAs(id, () -> auditService.list(id, entityType, entityId, pageable));
         return ResponseEntity.ok(PagedResponse.from(page, auditEventMapper::toResponse));
     }
 }
