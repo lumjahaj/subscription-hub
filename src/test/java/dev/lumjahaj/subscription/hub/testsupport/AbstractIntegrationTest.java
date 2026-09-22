@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -104,6 +105,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 // in tests at all. On the base for the usual reason: an annotation on one
 // subclass would be a second context.
 @AutoConfigureObservability
+// Fixture SQL runs as the schema owner, not as the application's restricted
+// role - see OwnerJdbcTemplateConfig for why that is both necessary and the
+// honest description of what those statements are. On the shared base, like
+// every other piece of context configuration here, so there is still one
+// context-cache key for the whole suite.
+@Import(OwnerJdbcTemplateConfig.class)
 public abstract class AbstractIntegrationTest {
 
     /** Matches the bcrypt hash in db/seed/V9001__seed_dev_users.sql. */

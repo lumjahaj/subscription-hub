@@ -8,12 +8,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -42,6 +44,10 @@ class TenantConnectionBindingIntegrationTest extends AbstractIntegrationTest {
     /** The pool the application itself uses, decorator and all. */
     @Autowired
     private DataSource applicationDataSource;
+
+    /** The suite's fixture template, which runs as the owner. */
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     private HikariDataSource pool;
     private DataSource tenantAware;
@@ -133,6 +139,30 @@ class TenantConnectionBindingIntegrationTest extends AbstractIntegrationTest {
             assertThat(rs.getBoolean(2)).as("a superuser bypasses every policy").isFalse();
             assertThat(rs.getBoolean(3)).as("BYPASSRLS does exactly what it says").isFalse();
         }
+    }
+
+    /**
+     * The other half of the same premise: the suite's fixture SQL must NOT be
+     * subject to the policies, or fifteen test classes would silently start
+     * updating zero rows the moment they exist.
+     *
+     * <p>Asserted here because, until policies land, running fixtures as the
+     * owner and as the application's role look exactly the same — a green
+     * build proves nothing about which one is in use. See
+     * OwnerJdbcTemplateConfig.
+     */
+    @Test
+    void fixtureSqlRunsAsARoleThePoliciesDoNotApplyTo() {
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+                "SELECT current_user AS who,"
+                        + " (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser");
+
+        assertThat(row.get("who"))
+                .as("fixtures must not run as the application's restricted role")
+                .isNotEqualTo(APP_ROLE);
+        assertThat(row.get("superuser"))
+                .as("the owner is what makes fixture SQL exempt from the policies")
+                .isEqualTo(true);
     }
 
     /** What the RLS policies will read. */
