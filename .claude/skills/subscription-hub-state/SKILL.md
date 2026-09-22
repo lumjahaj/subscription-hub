@@ -1033,6 +1033,101 @@ description: What is built in Subscription Hub, why each decision was made, and 
     the forced race to catch the bug — but a succeeded payment's invoice is worth
     asserting wherever it is claimed.
 
+- **Postgres row-level security** (2026-09-22) — V20–V23,
+  `TenantAwareDataSource`, and a second database role. The last item this
+  document listed as outstanding, and the one that turns the isolation
+  convention into something the database enforces.
+  - **It was worth doing for two tables specifically.** Every other tenant-owned
+    table already had `@TenantId` adding a predicate even when a query forgot.
+    `app_user` and `audit_event` had nothing but a naming convention, because
+    both are `@TenantId` exceptions: a login has no tenant in context (reading
+    `app_user` is what establishes one), and a platform administrator records
+    events under the tenant being acted on from a request naming no tenant. A
+    second repository method written without the tenant would have leaked with
+    nothing to catch it. Stopping before those two would have meant hardening
+    what was already protected twice and skipping what was protected once.
+  - **The premise almost everyone gets wrong: it would have been a no-op.**
+    `POSTGRES_USER` is created by the Postgres image as a superuser *and* owns
+    every table, and Postgres exempts both from RLS. Enabling policies while the
+    application connected as that role would have left them in place, correct,
+    and enforcing nothing — with a fully green test suite. So the work is a
+    second role (`subscription_hub_app`: `NOSUPERUSER`, `NOBYPASSRLS`, owns
+    nothing) before it is a migration.
+    `TenantConnectionBindingIntegrationTest` fails if that regresses, and was
+    demonstrated to fail by pointing the app back at the owner.
+  - **No `FORCE ROW LEVEL SECURITY`, deliberately.** Without FORCE the owner is
+    exempt, and the owner is what Flyway migrates as. That is what keeps a
+    cross-tenant backfill working — V3's
+    `UPDATE plan SET interval_unit = interval::plan_interval_unit` rewrites every
+    tenant's rows and under FORCE would silently update none. The argument is
+    not hypothetical; that migration is already in the repository.
+  - **The role is infrastructure, its privileges are schema.** It carries a
+    password, and CLAUDE.md §5 keeps credentials out of `db/migration`, which
+    runs everywhere. So `docker/postgres/init/01-app-role.sh` creates it (the
+    same file mounted into the compose Postgres and copied into the
+    Testcontainers one), and V20 grants it DML and nothing else — no DDL, no
+    TRUNCATE, and `flyway_schema_history` revoked again. The cost is that an
+    existing `postgres_data` volume never ran the script, so V20 fails loudly
+    with a message naming it; README gives both ways out.
+  - **`SET LOCAL` cannot work here, and that was the one surprise.** The
+    transaction-local form of the setting would be self-cleaning and is the
+    obvious choice. But Spring borrows the connection *before* it issues BEGIN,
+    so a transaction-local set at borrow time runs in its own implicit
+    transaction and is discarded immediately — it would silently do nothing.
+    `TenantAwareDataSource` therefore sets the session-level form on every borrow
+    and clears it on return, through a `Connection` proxy that intercepts
+    `close()`.
+  - **Binding on borrow, not the reset, is what prevents tenant bleed.** A
+    pooled connection always has the value overwritten before the next borrower
+    can read it. The reset upholds the stronger invariant that a connection
+    *sitting in the pool* names no tenant, which matters for anything reaching
+    the pool outside the decorator. The test for it had to read the connection
+    back from the underlying Hikari pool: borrowing through the decorator again
+    rebinds the value, so the obvious version of that test would have passed
+    whether or not any reset existed.
+  - **`runAs` must wrap the transaction, not sit inside it.** The connection is
+    bound when the transaction opens, so changing the ThreadLocal inside a
+    `@Transactional` method is already too late. `PaymentWebhookService` and the
+    four jobs were correct as written; login and the platform endpoints needed
+    the wrapping moved out to the controller, which is what `TenantContext.callAs`
+    (value-returning `runAs`) exists for. Same rule as `@TenantId` resolving at
+    session open, one layer lower.
+  - **The platform audit read is the one that would have failed quietly.** Its
+    javadoc said it needed no session handling because `audit_event` has no
+    `@TenantId` — true of Hibernate, irrelevant to a policy that applies to the
+    connection. Unwrapped it returns an empty page, and a tenant's history
+    silently looking empty is the one failure an audit log must not have.
+  - **The two cross-tenant gauges reach past the policies through SECURITY
+    DEFINER functions** (V21), granted to one role, with `search_path` pinned —
+    without which the caller chooses where `notification` and `tenant` resolve
+    and can point them at objects that then run as the owner. `REVOKE FROM
+    PUBLIC` first, because Postgres grants EXECUTE to PUBLIC by default.
+    Rejected: a sentinel tenant value the policy honours (reachable by anything
+    that can set a string, and no ArchUnit rule can see a string literal), and a
+    second owner connection (its own pool, and "who may use it" becomes a
+    question about bean wiring rather than a grant).
+  - **That change landed before the policies, deliberately.** In the other order
+    the gauges would have read 0 in between: not an error, not a failure, just a
+    number that is quietly wrong — the `job`-label bug's exact shape, and
+    `BusinessMetricsIntegrationTest` could not have caught it, because it asserts
+    the metric *names* appear and a gauge reading 0 still prints its name.
+  - **Fixture SQL moved to the owner.** Fifteen integration classes drive
+    `JdbcTemplate` against tenant-scoped tables by primary key with no
+    `tenant_id` in the WHERE. Under the policies they would all have touched zero
+    rows — the `queryForObject` calls failing loudly, the `update(...)` ones
+    passing vacuously. A test-only `JdbcTemplate` bean on the owner's credentials
+    replaces Boot's, which works without `allow-bean-definition-overriding`
+    because `JdbcTemplateConfiguration` is
+    `@ConditionalOnMissingBean(JdbcOperations.class)`; all fifteen classes needed
+    no edits.
+  - **`RowLevelSecurityIntegrationTest` is the proof**, and covers what
+    `TenantIsolationIntegrationTest` structurally cannot: raw JDBC on the
+    application's own connection with no `tenant_id` anywhere in the statement.
+    demo reads acme's row by primary key and gets nothing; acme gets it; a write
+    aimed at another tenant is refused by `WITH CHECK`; an unbound connection
+    reads nothing at all. A fifth test asserts no table with a `tenant_id` column
+    lacks a policy, so the next tenant-owned table cannot quietly skip one. All
+    were demonstrated to fail with RLS disabled on one table.
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -1106,11 +1201,18 @@ feature module does.
   authentication landed, `X-Tenant-Id` was client-supplied and unverified: anyone
   who could reach the API was any tenant they liked. `@TenantId` and
   `TenantIsolationIntegrationTest` protected tenant A from tenant B's *bugs*, never
-  from B claiming to be A. That is closed — but note `AppUserEntity` is now an
-  entity with no `@TenantId` predicate at all (CLAUDE.md §4), so its single repository method
-  is the *only* thing scoping it. A second query added there without
-  `tenantId` would not be caught by the backstop.
+  from B claiming to be A. That is closed — and so is what this note used to
+  warn about next. `AppUserEntity` still has no `@TenantId` predicate at all
+  (CLAUDE.md §4), so `findByTenantIdAndEmail` was for a long time the *only*
+  thing scoping it, and a second query added there without `tenantId` would have
+  been caught by nothing. V23 puts `app_user` under a row-level security policy,
+  which is the backstop that was missing; closing exactly this is why RLS was
+  worth doing at all.
 
+- ~~**Tenant isolation has a structural backstop, now verified but not fully
+  closed.**~~ — closed by Postgres row-level security (see Current state). The
+  text below stands as the description of what `@TenantId` does and does not
+  cover, which is still exactly right; RLS is what covers the rest.
 - **Tenant isolation has a structural backstop, now verified but not fully
   closed.** Hibernate `@TenantId` (not `@Filter` — that's opt-in per `Session`
   and easy to forget to enable, so it's not worth using once `@TenantId` is in
@@ -1124,11 +1226,11 @@ feature module does.
   `UsageCounterJpaRepository.upsertAndIncrement` and
   `InvoiceJpaRepository.allocateNextNumber` (see Current state), which bind `tenantId`
   by hand instead — or anything outside Hibernate entirely (a raw JDBC
-  script, a future reporting tool). Postgres row-level security remains
-  the stronger, DB-level option for those cases — deliberately not done yet;
-  the Testcontainers harness that was the prerequisite for verifying it
-  properly now exists, so RLS is next up if the `SET LOCAL`/HikariCP wiring
-  is worth it.
+  script, a future reporting tool). Postgres row-level security now covers
+  exactly those cases — see Current state. The `SET LOCAL`/HikariCP wiring this
+  note wondered about turned out to be the one design decision that could not be
+  taken as written: `SET LOCAL` is discarded when issued at connection-borrow
+  time, because the borrow happens before the transaction begins.
 - ~~Check-then-save uniqueness race~~ — closed. See Current state's API hardening pass.
   `findByTenantIdAndCode(...).ifPresent(throw)` followed by `save(...)` is
   still not atomic, but the losing side of the race now gets the same 409
@@ -1426,10 +1528,12 @@ feature module does.
 
 **Audit events**
 
-- **Isolation is explicit only.** `audit_event` has no `@TenantId` backstop (see
-  Current state), so a future repository method that forgets `tenantId` would
-  leak across tenants with nothing to catch it. This is the same trade
-  `AppUserEntity` makes, and the reason the port has only three methods.
+- ~~**Isolation is explicit only.**~~ — closed. `audit_event` still has no
+  `@TenantId` backstop, for the reason described in Current state, but V23 puts
+  it under a row-level security policy, so a repository method that forgets
+  `tenantId` now returns nothing rather than another tenant's events. The same
+  applies to `AppUserEntity`, which made the same trade. The port still has only
+  three methods.
 - **Nothing makes it tamper-evident.** Append-only is a property of the
   application code, not the database: anyone with SQL access can update or
   delete a row. A real audit log would revoke `UPDATE`/`DELETE` from the

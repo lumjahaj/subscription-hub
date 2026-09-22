@@ -319,6 +319,40 @@ row-level isolation protected each tenant from the others' *bugs*, but nothing
 stopped someone from simply claiming to be another tenant. Taking it from a
 signed claim is what closes that.
 
+Isolation is then enforced in **three** places, deliberately overlapping:
+
+| Layer | Covers | Misses |
+|---|---|---|
+| `findByTenantIdAndX(...)` convention | everything, if nobody forgets | the day somebody forgets |
+| Hibernate `@TenantId` | every query Hibernate builds | native SQL, raw JDBC, reporting tools |
+| **Postgres row-level security** | every statement on the connection | nothing the application can issue |
+
+The database layer is what makes the other two defence in depth rather than the
+whole defence. It matters most for `app_user` and `audit_event`, the two tables
+that cannot use `@TenantId` at all — a login has no tenant in context, because
+reading `app_user` is what establishes one.
+
+Making it actually enforce anything needed two database roles. Postgres exempts
+superusers and table owners from its own policies, so an application connecting
+as the owner would leave every policy in place and enforcing nothing. Flyway
+migrates as the owner; the application connects as `subscription_hub_app`, which
+owns nothing and is `NOBYPASSRLS`. The policies are deliberately not `FORCE`d, so
+the owner stays exempt — which is what lets a migration still rewrite every
+tenant's rows at once, as `V3` does.
+
+The tenant reaches the database as a session setting, bound by
+`TenantAwareDataSource` on every connection borrow and cleared on return. That
+placement is forced: a connection is borrowed *before* the transaction begins, so
+the transaction-local form (`SET LOCAL`) would be discarded immediately and do
+nothing. It also means `TenantContext.runAs`/`callAs` has to wrap a transaction
+rather than sit inside one.
+
+Two queries are cross-tenant on purpose — the outbox-age and stuck-payment
+gauges, read during a Prometheus scrape, which has no tenant. They reach past the
+policies through `SECURITY DEFINER` functions granted to one role: the only
+bypass in the codebase, and a pair of named database objects rather than a flag
+anything can set.
+
 No token returns `401 UNAUTHENTICATED`; an authenticated caller lacking the
 required role returns `403 ACCESS_DENIED`.
 
@@ -447,7 +481,9 @@ the client should re-read and retry.
 ## Tech stack
 
 - Java 21, Spring Boot 3.5.6 (Web, Data JPA, Validation, Security)
-- PostgreSQL 17, Flyway migrations, Hibernate 6
+- PostgreSQL 17, Flyway migrations, Hibernate 6, and Postgres row-level security
+  for tenant isolation (the application connects as a restricted, non-owner role
+  so the policies actually apply to it)
 - MinIO for object storage, reached with the **AWS SDK v2 for S3** — MinIO is
   S3-compatible, so the same code runs against real S3 or R2 by changing an
   endpoint

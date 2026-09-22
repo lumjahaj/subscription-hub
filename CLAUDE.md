@@ -221,19 +221,57 @@ on every tenant-owned table.
   late, but a request Security rejects never reaches it, and those responses still
   need a correlation id.
 
-**Every repository query must still be tenant-scoped explicitly.**
-`findByTenantIdAndCode(...)`, never `findByCode(...)`. This is no longer the
-*only* thing enforcing isolation — see Known gaps and improvements in the subscription-hub-state skill — but it stays mandatory as defense
-in depth: the structural backstop only covers Hibernate-mediated queries, not
-a native/`nativeQuery = true` one. There are now two tenant-scoped ones —
+**Isolation is enforced in three places, and all three stay.**
+
+1. **Every repository query is tenant-scoped explicitly** —
+   `findByTenantIdAndCode(...)`, never `findByCode(...)`. Still mandatory: it
+   is the intention-revealing contract, and the only layer a reader sees.
+2. **Hibernate `@TenantId`** adds the predicate automatically — but only to
+   queries Hibernate builds.
+3. **Postgres row-level security** (V22, V23) applies to every statement the
+   application's connection issues, whichever layer wrote it. This is what
+   finally covers the cases `@TenantId` structurally cannot: a
+   `nativeQuery = true`, raw JDBC, a reporting tool.
+
+**How RLS is wired**, because every piece of it is load-bearing:
+- The app connects as **`subscription_hub_app`** — not `POSTGRES_USER`, which
+  is a superuser *and* the table owner, and Postgres exempts both from RLS. An
+  application connecting as the owner would leave every policy enforcing
+  nothing, silently. `TenantConnectionBindingIntegrationTest` fails if that
+  regresses.
+- **Flyway keeps migrating as the owner**, and the policies are deliberately
+  **not** `FORCE`d. That exemption is what lets a cross-tenant backfill work —
+  V3's `UPDATE plan SET interval_unit = ...` rewrites every tenant's rows and
+  under FORCE would silently update none.
+- The role is created by `docker/postgres/init/01-app-role.sh`
+  (**infrastructure**, because it carries a password — §5), while its grants
+  and policies are migrations.
+- `TenantAwareDataSource` binds `app.tenant_id` on **every connection borrow**
+  and clears it on return. Not `connection-init-sql` (once per physical
+  connection), and not `SET LOCAL`/`set_config(..., true)` — the connection is
+  borrowed *before* Spring issues BEGIN, so a transaction-local set there is
+  discarded immediately and does nothing at all.
+- Policies use `current_setting('app.tenant_id', true)`, so an unbound
+  connection reads **nothing** rather than everything.
+
+**`TenantContext.runAs`/`callAs` must wrap the *transaction*, not sit inside
+it.** The connection is bound when the transaction opens, so changing the
+ThreadLocal inside a `@Transactional` method is already too late — the work is
+scoped to whatever was in context on entry. `PaymentWebhookService` and the
+four jobs were already correct; login and the platform endpoints needed the
+wrapping moved out to the controller, which is why `callAs` exists. Same rule
+as `@TenantId` resolving at session open, one layer lower.
+
+**Native queries still bind `tenantId` explicitly.** Two are tenant-scoped —
 `UsageCounterJpaRepository.upsertAndIncrement` and
-`InvoiceJpaRepository.allocateNextNumber` (see Current state in the subscription-hub-state skill) — and `tenantId` is bound
-explicitly in both for exactly this reason. Two more are cross-tenant *on
-purpose*, because each feeds a gauge during a metrics scrape, which has no
-tenant, and returns one aggregate number and no rows:
-`NotificationJpaRepository.oldestAgeSecondsAcrossActiveTenants` (outbox age) and
-`PaymentJpaRepository.oldestPendingAgeSecondsAcrossActiveTenants` (stuck
-payments). A new native query must be one of those two kinds, and say which.
+`InvoiceJpaRepository.allocateNextNumber` — and RLS now covers them too, but
+the explicit binding stays as the readable contract. Two more are cross-tenant
+*on purpose*, feeding gauges during a metrics scrape, which has no tenant:
+`NotificationJpaRepository.oldestAgeSecondsAcrossActiveTenants` and
+`PaymentJpaRepository.oldestPendingAgeSecondsAcrossActiveTenants`. Those two
+reach past the policies through **SECURITY DEFINER functions** (V21) — the only
+bypass in the codebase, granted to one role, with `search_path` pinned. A new
+native query must be one of those two kinds, and say which.
 
 **`spring.jpa.open-in-view` is off, and must stay off.** Hibernate resolves
 `@TenantId` *when a session opens*. With open-in-view the session opened at the
@@ -282,6 +320,18 @@ in the same transaction as the tenant change, which rules out the
 so `updated_at` would mean nothing. Every `AuditEventRepository` method takes the
 tenant, and `AuditIntegrationTest` proves one tenant cannot read another's
 events.
+
+**Both are still `@TenantId` exceptions, and neither is unprotected any more.**
+V23 puts both under RLS, which resolves the same chicken-and-egg differently:
+the policy reads a setting bound to the *connection*, so the tenant only has to
+be known before the transaction opens, not before Hibernate builds a query. That
+is what `TenantContext.callAs` does at the three entry points — `AuthController`
+(login), and `PlatformTenantController` for provisioning, activation and the
+platform view of a tenant's audit log. These two were the only tables with no
+structural backstop at all, which is the reason RLS was worth doing rather than
+a hardening of things already protected twice. `RowLevelSecurityIntegrationTest`
+now asserts that **no** table with a `tenant_id` column lacks a policy, so a new
+tenant-owned table cannot quietly skip one.
 
 ---
 
@@ -760,6 +810,13 @@ added in V3, replacing the old `plan.interval` string column), `invoice_status`
 
 Seeded tenants for local dev: `acme`, `demo`.
 
+**Two database roles.** `POSTGRES_USER` is a superuser, owns the schema, and is
+what Flyway migrates as. The application connects as `subscription_hub_app`,
+which owns nothing and is `NOBYPASSRLS` — see §4. Every table with a `tenant_id`
+column carries a `tenant_isolation` policy (V22, V23); the only exceptions are
+`tenant` and `platform_user` (they belong to no tenant) and `app_user_role` (no
+`tenant_id` — it hangs off `app_user` by `user_id`).
+
 ---
 
 ## 7. Roadmap
@@ -801,8 +858,25 @@ The re-sequenced roadmap is complete. Payment reconciliation (2026-09-18) was
 taken next, ahead of the parked deployment idea and of Postgres RLS: it closed
 the one gap the state skill called "the first thing a real system would add",
 and it was the only candidate that fixed a live defect rather than hardening
-something already correct. Deployment (managed free tiers) remains parked and
-undecided; RLS is still the stronger isolation backstop when it is wanted.
+something already correct.
+
+**Postgres row-level security followed (2026-09-22)**, and is done — the last
+item the state skill named as outstanding. It was worth doing for `app_user` and
+`audit_event` specifically: every other tenant-owned table already had `@TenantId`
+as a backstop, while those two had nothing but a naming convention. See §4.
+Deployment (managed free tiers) remains parked and undecided.
+
+- **Two roles, not `FORCE ROW LEVEL SECURITY`.** Keeping Flyway on the owner is
+  what lets a cross-tenant backfill still work; FORCE would have made V3's
+  `UPDATE plan SET interval_unit = ...` silently update nothing.
+- **The bypass for the two cross-tenant gauges is a pair of SECURITY DEFINER
+  functions**, chosen over a sentinel tenant value the policy would honour (any
+  code that can set a string reaches it, and no test can see a string literal)
+  and over a second owner connection (a pool, and "who may use it" becomes a
+  question about bean wiring rather than a grant).
+- **The gauges were moved before the policies landed**, deliberately: in the
+  other order they would have read 0 in between — a metric that lies rather than
+  fails, which is the `job`-label bug's exact shape.
 
 - **Reconciliation was not given an `abandon` path**, though one looked obvious.
   Freeing a stuck payment's in-flight slot without the provider's confirmation
