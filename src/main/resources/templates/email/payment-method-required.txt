@@ -1,0 +1,11 @@
+Hi [[${customerName}]],
+
+Invoice [[${invoiceNumber}]] ([[${amount}]] [[${currency}]]) is due, but
+there is no payment method on your account for us to charge.
+
+Please add one so we can collect it. We'll check again on
+[[${nextAttemptDate}]]; if there is still no payment method after several
+reminders, your subscription will be canceled.
+
+--
+This is an automated message - please do not reply to this email.

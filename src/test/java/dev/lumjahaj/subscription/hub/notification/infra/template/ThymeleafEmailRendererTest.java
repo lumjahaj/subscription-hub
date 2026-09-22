@@ -68,6 +68,26 @@ class ThymeleafEmailRendererTest {
     }
 
     @Test
+    void thePaymentMethodRequiredEmail_asksForAPaymentMethodRatherThanPromisingARetry() {
+        EmailContent content = renderer.render(EmailTemplate.PAYMENT_METHOD_REQUIRED, Map.of(
+                "subject", "Please add a payment method for invoice INV-000006",
+                "customerName", "Jane Doe",
+                "invoiceNumber", "INV-000006",
+                "amount", "29.99",
+                "currency", "USD",
+                "nextAttemptDate", "2026-02-05"
+        ));
+
+        assertThat(content.html()).contains("Jane Doe", "INV-000006", "29.99", "USD", "2026-02-05");
+        assertThat(content.text()).contains("Jane Doe", "INV-000006", "29.99", "USD", "2026-02-05");
+        assertThat(content.text()).doesNotContain("<", ">");
+        // The whole reason this is not a variant of payment-failed: retrying
+        // cannot work until the customer acts, so the copy must not suggest
+        // that no action is needed.
+        assertThat(content.text()).doesNotContainIgnoringCase("no action is needed");
+    }
+
+    @Test
     void aCustomerNameWithMarkup_comesOutEscapedInTheHtmlBody() {
         EmailContent content = renderer.render(EmailTemplate.SUBSCRIPTION_CANCELED, Map.of(
                 "subject", "Your subscription has been canceled",

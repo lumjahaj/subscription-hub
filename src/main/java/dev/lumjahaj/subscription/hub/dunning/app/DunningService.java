@@ -47,6 +47,11 @@ public class DunningService implements PaymentOutcomeListener {
 
     private static final Logger log = LoggerFactory.getLogger(DunningService.class);
     private static final int MAX_TRANSITION_ATTEMPTS = 3;
+    /**
+     * Our own failure code, in the same field as the provider's. No provider
+     * ever produces it, because the provider was never called.
+     */
+    private static final String NO_PAYMENT_METHOD = "NO_PAYMENT_METHOD";
 
     private final DunningStateRepository dunningStates;
     private final InvoiceRepository invoices;
@@ -154,6 +159,27 @@ public class DunningService implements PaymentOutcomeListener {
         // a declined manual attempt is retried automatically from then on.
         DunningStateEntity state = dunningStates.findByTenantIdAndInvoiceId(tenantId, invoiceId)
                 .orElseGet(() -> newState(tenantId, invoice, Instant.now()));
+
+        // state.getNextAttemptAt() already reflects the schedule's next
+        // slot: startAttempt set it before the provider was ever called, so
+        // there is nothing left to compute here, only to tell the customer.
+        recordFailure(invoice, state, failureCode, () ->
+                notificationService.enqueuePaymentFailed(
+                        invoice, state.getAttemptCount(), state.getNextAttemptAt()));
+    }
+
+    /**
+     * What an uncollected invoice means, however the collection failed.
+     *
+     * A declined card and a customer with no card on file are the same
+     * business event — we could not collect, and the customer has to act —
+     * and they differ only in what we ask them to do, which is the
+     * notification's job. Sharing one path is what guarantees both of them
+     * end: the missing-payment-method case used to have no path at all and
+     * so never ended.
+     */
+    private void recordFailure(
+            InvoiceEntity invoice, DunningStateEntity state, String failureCode, Runnable notifyCustomer) {
         state.setLastFailureCode(failureCode);
 
         if (schedule.isExhausted(state.getAttemptCount())) {
@@ -162,17 +188,21 @@ public class DunningService implements PaymentOutcomeListener {
         }
 
         dunningStates.save(state);
-        markPastDue(invoice);
-        // state.getNextAttemptAt() already reflects the schedule's next
-        // slot: startAttempt set it before the provider was ever called, so
-        // there is nothing left to compute here, only to tell the customer.
-        notificationService.enqueuePaymentFailed(invoice, state.getAttemptCount(), state.getNextAttemptAt());
+        markPastDue(invoice, failureCode);
+        notifyCustomer.run();
     }
 
     /**
      * Claims the next collection attempt for an invoice, or returns empty
-     * when there is nothing to do: not due yet, already settled, a payment
-     * still in flight, or no stored payment method to charge.
+     * when there is no payment for the job to make: not due yet, already
+     * settled, a payment still in flight, or no stored payment method.
+     *
+     * Empty does not mean nothing happened. The last of those cases is a
+     * collection failure that is settled here and now — no provider can be
+     * asked about a card that does not exist — so it counts its attempt,
+     * emails the customer and eventually gives up, exactly as a decline
+     * does. The job is still told nothing, which keeps its invariant intact:
+     * it starts attempts and never reads outcomes.
      *
      * Lives here rather than in DunningJob because it must be a real
      * transaction: a @Transactional method called from another method of
@@ -209,17 +239,24 @@ public class DunningService implements PaymentOutcomeListener {
 
         String paymentMethod = invoice.getCustomer().getDefaultPaymentMethod();
         if (paymentMethod == null) {
-            // Nothing to charge with. Left OPEN for a human to collect
-            // rather than written off.
-            log.info("Skipping invoice {}: customer {} has no stored payment method",
+            // Nothing to charge with — which is a collection failure, not a
+            // reason to skip. Skipping retired the invoice from dunning
+            // permanently: no schedule was ever written, so it was never
+            // chased, never emailed and never written off, while the
+            // subscription stayed ACTIVE and BillingCycleJob renewed it into
+            // another uncollectable invoice every period. Counting the
+            // attempt is what bounds it, and PAST_DUE below is what stops
+            // renewal adding to the pile.
+            log.info("Invoice {} cannot be collected: customer {} has no stored payment method",
                     invoice.getNumber(), invoice.getCustomer().getId());
+            claimAttempt(state, now);
+            recordFailure(invoice, state, NO_PAYMENT_METHOD, () ->
+                    notificationService.enqueuePaymentMethodRequired(
+                            invoice, state.getAttemptCount(), state.getNextAttemptAt()));
             return Optional.empty();
         }
 
-        int attemptNumber = state.getAttemptCount() + 1;
-        state.setAttemptCount(attemptNumber);
-        state.setNextAttemptAt(schedule.nextAttemptAt(attemptNumber, now));
-        dunningStates.save(state);
+        int attemptNumber = claimAttempt(state, now);
         AfterCommit.run(() -> Counter.builder("dunning.attempts.started")
                 .description("Automatic collection attempts claimed, before the provider is called")
                 .register(registry)
@@ -229,6 +266,26 @@ public class DunningService implements PaymentOutcomeListener {
         // same attempt at the provider instead of charging twice.
         return Optional.of(new DunningAttempt(
                 attemptNumber, paymentMethod, "dunning:" + invoiceId + ":" + attemptNumber));
+    }
+
+    /**
+     * Counts this attempt and moves the schedule on to its next slot.
+     *
+     * Always before anything can fail: a crash then costs one retry rather
+     * than leaving the invoice due again immediately, which on an hourly
+     * cron means charging the customer every hour.
+     *
+     * The dunning.attempts.started counter is deliberately not incremented
+     * here but at the one call site that goes on to call the provider — it
+     * measures attempts that cost a provider fee, and a customer with no
+     * payment method costs none.
+     */
+    private int claimAttempt(DunningStateEntity state, Instant now) {
+        int attemptNumber = state.getAttemptCount() + 1;
+        state.setAttemptCount(attemptNumber);
+        state.setNextAttemptAt(schedule.nextAttemptAt(attemptNumber, now));
+        dunningStates.save(state);
+        return attemptNumber;
     }
 
     private boolean hasPaymentInFlight(String tenantId, UUID invoiceId) {
@@ -246,7 +303,7 @@ public class DunningService implements PaymentOutcomeListener {
         return state;
     }
 
-    private void markPastDue(InvoiceEntity invoice) {
+    private void markPastDue(InvoiceEntity invoice, String failureCode) {
         String tenantId = invoice.getTenantId();
         SubscriptionEntity subscription = invoice.getSubscription();
         // CANCELED stays canceled, and PAUSED is a deliberate customer
@@ -255,11 +312,15 @@ public class DunningService implements PaymentOutcomeListener {
         transitionSubscription(tenantId, subscription, EnumSet.of(SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING),
                 from -> subscriptions.updateStatusIfStatus(tenantId, subscription.getId(), from, SubscriptionStatus.PAST_DUE))
                 .ifPresent(from -> {
+                    // The reason separates a card that keeps declining from a
+                    // customer who never stored one: the same status, but
+                    // only one of them can be fixed by retrying.
                     audit.recordSystem(AuditEventType.SUBSCRIPTION_PAST_DUE, subscription.getId(), Map.of(
                             "from", from,
+                            "reason", failureCode,
                             "invoiceId", invoice.getId()));
-                    log.info("Subscription {} is PAST_DUE after a failed payment for invoice {}",
-                            subscription.getId(), invoice.getNumber());
+                    log.info("Subscription {} is PAST_DUE after failing to collect invoice {} ({})",
+                            subscription.getId(), invoice.getNumber(), failureCode);
                 });
     }
 
@@ -300,7 +361,8 @@ public class DunningService implements PaymentOutcomeListener {
         invoices.save(invoice);
         audit.recordSystem(AuditEventType.INVOICE_UNCOLLECTIBLE, invoice.getId(), Map.of(
                 "number", invoice.getNumber(),
-                "attempts", state.getAttemptCount()));
+                "attempts", state.getAttemptCount(),
+                "lastFailure", failureCode));
 
         SubscriptionEntity subscription = invoice.getSubscription();
         String tenantId = invoice.getTenantId();

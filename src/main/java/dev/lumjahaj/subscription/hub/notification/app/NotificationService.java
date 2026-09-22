@@ -149,6 +149,39 @@ public class NotificationService implements InvoiceIssuedListener {
                 customer.getEmail(), EmailTemplate.PAYMENT_RECOVERED, model, invoice);
     }
 
+    /**
+     * The other reason an invoice goes uncollected: there is no payment
+     * method on file to charge at all.
+     *
+     * A separate type rather than a variant of enqueuePaymentFailed, because
+     * the two ask the customer for opposite things. "We'll try again, no
+     * action is needed if your payment method is up to date" is actively
+     * wrong here - retrying cannot work until the customer does something,
+     * and telling them otherwise is how an invoice quietly reaches
+     * cancellation with the customer believing it was in hand.
+     *
+     * Keyed by attempt like payment-failed, so each reminder in the schedule
+     * is sent rather than deduplicated away as one.
+     */
+    @Transactional
+    public void enqueuePaymentMethodRequired(InvoiceEntity invoice, int attemptCount, Instant nextAttemptAt) {
+        String tenantId = TenantContext.getTenantId();
+        CustomerEntity customer = invoice.getCustomer();
+        String subject = "Please add a payment method for invoice " + invoice.getNumber();
+
+        Map<String, Object> model = new HashMap<>();
+        model.put("subject", subject);
+        model.put("customerName", customer.getName());
+        model.put("invoiceNumber", invoice.getNumber());
+        model.put("amount", formatCents(invoice.getTotalCents()));
+        model.put("currency", invoice.getCurrency());
+        model.put("nextAttemptDate", formatDate(nextAttemptAt));
+
+        String dedupKey = "payment-method-required:" + invoice.getId() + ":" + attemptCount;
+        enqueue(tenantId, NotificationType.PAYMENT_METHOD_REQUIRED, dedupKey,
+                customer.getEmail(), EmailTemplate.PAYMENT_METHOD_REQUIRED, model, invoice);
+    }
+
     @Transactional
     public void enqueueSubscriptionCanceled(InvoiceEntity invoice) {
         String tenantId = TenantContext.getTenantId();

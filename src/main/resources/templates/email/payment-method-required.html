@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <title th:text="${subject}">Please add a payment method</title>
+</head>
+<body>
+<div th:replace="~{layout.html :: layout(~{::section})}">
+    <section>
+        <p>Hi <span th:text="${customerName}">Customer</span>,</p>
+        <p>
+            Invoice <strong th:text="${invoiceNumber}">INV-000001</strong>
+            (<span th:text="${amount} + ' ' + ${currency}">0.00 USD</span>)
+            is due, but there is no payment method on your account for us to
+            charge.
+        </p>
+        <p>Please add one so we can collect it. We'll check again on
+           <span th:text="${nextAttemptDate}">2026-01-01</span>; if there is
+           still no payment method after several reminders, your subscription
+           will be canceled.</p>
+    </section>
+</div>
+</body>
+</html>

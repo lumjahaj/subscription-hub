@@ -9,6 +9,7 @@ public enum EmailTemplate {
     INVOICE_ISSUED("invoice-issued"),
     PAYMENT_FAILED("payment-failed"),
     PAYMENT_RECOVERED("payment-recovered"),
+    PAYMENT_METHOD_REQUIRED("payment-method-required"),
     SUBSCRIPTION_CANCELED("subscription-canceled");
 
     private final String templateName;

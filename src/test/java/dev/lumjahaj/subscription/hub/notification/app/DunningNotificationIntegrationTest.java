@@ -109,6 +109,25 @@ class DunningNotificationIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
+    void aCustomerWithNoPaymentMethod_isAskedToAddOne_notToldWeWillRetry() {
+        // The failure the customer has to fix themselves. The payment-failed
+        // copy ("no action is needed if your payment method is up to date")
+        // would be actively wrong here, which is why this is its own type.
+        UUID subscriptionId = createActiveSubscription(TENANT);
+        forcePeriodDue(subscriptionId);
+        UUID invoiceId = generateInvoice(subscriptionId);
+        String invoiceNumber = invoiceNumberFor(subscriptionId);
+
+        dunningJob.run();
+        relayJob.run();
+
+        JsonNode email = awaitMessage("Please add a payment method for invoice", invoiceNumber);
+        assertThat(email.path("Text").asText()).contains(invoiceNumber);
+        assertThat(notificationTypesFor(invoiceId))
+                .containsExactly("INVOICE_ISSUED", "PAYMENT_METHOD_REQUIRED");
+    }
+
+    @Test
     void aFirstAttemptThatSimplySucceeds_sendsNoRecoveryEmail() {
         // The trigger is a real PAST_DUE -> ACTIVE transition, not the mere
         // existence of a dunning row. startAttempt creates one before the

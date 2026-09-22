@@ -165,15 +165,53 @@ class DunningIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void anInvoiceWhoseCustomerHasNoStoredMethod_isLeftAlone() {
+    void anInvoiceWhoseCustomerHasNoStoredMethod_isChasedLikeADecline_andEventuallyWrittenOff() {
+        // It used to be skipped, which meant skipped forever: no schedule was
+        // written, so the invoice was never chased, never emailed and never
+        // written off, and the subscription stayed ACTIVE for BillingCycleJob
+        // to renew into another uncollectable invoice every period.
         Fixture fixture = openInvoice();
 
         dunningJob.run();
 
+        // No provider was called - there is nothing to call it with.
         assertThat(paymentsFor(fixture.invoiceId())).isEmpty();
         assertThat(invoiceStatus(fixture.invoiceId())).isEqualTo("OPEN");
+        // PAST_DUE is what stops renewal issuing the next period's invoice.
+        assertThat(subscriptionStatus(fixture.subscriptionId())).isEqualTo("PAST_DUE");
+        assertThat(attemptCount(fixture.invoiceId())).isEqualTo(1);
+
+        JsonNode pastDue = auditHistory(TENANT, "SUBSCRIPTION", fixture.subscriptionId()).get(0);
+        assertThat(pastDue.get("type").asText()).isEqualTo("SUBSCRIPTION_PAST_DUE");
+        assertThat(pastDue.get("data").get("reason").asText()).isEqualTo("NO_PAYMENT_METHOD");
+
+        // Collection ends here too, on the same max-attempts as a decline.
+        setAttemptCount(fixture.invoiceId(), 3);
+        makeDue(fixture.invoiceId());
+        dunningJob.run();
+
+        assertThat(invoiceStatus(fixture.invoiceId())).isEqualTo("UNCOLLECTIBLE");
+        assertThat(subscriptionStatus(fixture.subscriptionId())).isEqualTo("CANCELED");
+        assertThat(dunningRowExists(fixture.invoiceId())).isFalse();
+        assertThat(paymentsFor(fixture.invoiceId())).isEmpty();
+        assertThat(auditHistory(TENANT, "INVOICE", fixture.invoiceId()).get(0).get("data").get("lastFailure").asText())
+                .isEqualTo("NO_PAYMENT_METHOD");
+    }
+
+    @Test
+    void aCustomerWhoAddsAPaymentMethodWhileBeingChased_isCollectedOnTheNextAttempt() {
+        // The remedy the email asks for has to actually work: the schedule
+        // started without a payment method must pick one up when it appears.
+        Fixture fixture = openInvoice();
+        dunningJob.run();
+        assertThat(subscriptionStatus(fixture.subscriptionId())).isEqualTo("PAST_DUE");
+
+        setPaymentMethod(fixture.customerId(), SUCCEEDS);
+        makeDue(fixture.invoiceId());
+        dunningJob.run();
+
+        assertThat(invoiceStatus(fixture.invoiceId())).isEqualTo("PAID");
         assertThat(subscriptionStatus(fixture.subscriptionId())).isEqualTo("ACTIVE");
-        // No schedule is started either: nothing was attempted.
         assertThat(dunningRowExists(fixture.invoiceId())).isFalse();
     }
 
