@@ -588,14 +588,30 @@ the data directory is first initialised.**
 ### 2. Run the application
 
 The Spring Boot app itself is **not** part of `docker-compose.yml`; run it
-directly against the containerized Postgres:
+directly against the containerized Postgres. It reads its configuration from
+ordinary environment variables and does **not** read `.env` itself — Docker
+Compose does that, which is why step 1 needed nothing — so export that file
+into the shell first:
 
 ```bash
+set -a; . ./.env; set +a
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
 ```
 
+```powershell
+Get-Content .env | Where-Object { $_ -match '^\s*[A-Za-z_][A-Za-z0-9_]*\s*=' } | ForEach-Object {
+    $p = $_ -split '=', 2
+    [Environment]::SetEnvironmentVariable($p[0].Trim(), $p[1].Trim().Trim('"').Trim("'"))
+}
+./mvnw spring-boot:run "-Dspring-boot.run.profiles=dev"
+```
+
+Without it the application stops during startup with
+`Could not resolve placeholder 'POSTGRES_DB'`.
+
 Or run `SubscriptionHubApplication` from your IDE with the `dev` profile
-active. It starts on **http://localhost:8080**.
+active and the same variables set on the run configuration. It starts on
+**http://localhost:8080**.
 
 The `dev` profile is what puts `db/seed` on the Flyway path, and therefore what
 creates the login accounts below. It is deliberately not the default: seed data
@@ -690,12 +706,16 @@ Dunning then runs hourly. To watch a full cycle without waiting, shorten its
 schedule with an environment variable and restart:
 
 ```bash
+set -a; . ./.env; set +a
 DUNNING_CYCLE_CRON="*/20 * * * * *" ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
 ```
 
-Pass it as an environment variable, not `-Dspring-boot.run.arguments`: Maven
-splits the six-field expression on spaces and the application refuses to start.
-`requests/dunning.http` walks through the states from there.
+The first line is the same prerequisite as step 2; on PowerShell, set
+`$env:DUNNING_CYCLE_CRON` after the loader given there.
+
+Pass the cron as an environment variable, not `-Dspring-boot.run.arguments`:
+Maven splits the six-field expression on spaces and the application refuses to
+start. `requests/dunning.http` walks through the states from there.
 
 Example request files covering happy paths, validation errors,
 conflict/not-found, role denials, and tenant-isolation checks live in

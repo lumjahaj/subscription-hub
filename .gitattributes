@@ -14,6 +14,9 @@
 *.properties text eol=lf
 *.xml  text eol=lf
 *.sql  text eol=lf
+# Sourced by the shell to export the app's environment (README §2), so it must
+# be LF even on Windows: with CRLF every value would end in a stray \r.
+.env.example text eol=lf
 
 # Docs
 *.md   text eol=lf
