@@ -752,7 +752,11 @@ No defaults; the application refuses to start without these.
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | The owner credentials Flyway migrates as |
 | `POSTGRES_APP_PASSWORD` | Password for `subscription_hub_app`, the role the application itself connects as |
 | `JWT_SECRET` | HS256 signing key, at least 32 bytes — checked at startup, not at first login |
-| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Object-store credentials, unless `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY` are given instead |
+
+`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` are required by `docker-compose.yml` for
+the MinIO container, but the application no longer reads them: it takes its
+object-store credentials from `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY`, which
+`.env.example` sets to the same values.
 
 ### Overridable
 
@@ -771,7 +775,7 @@ All defaulted, and all listed with their values in
 | Metrics | `METRICS_SCRAPE_USERNAME`, `METRICS_SCRAPE_PASSWORD` |
 | Bootstrap | `PLATFORM_ADMIN_EMAIL`, `PLATFORM_ADMIN_PASSWORD` |
 
-### Three that bite
+### Four that bite
 
 - **Never point `DB_URL` at a pooled endpoint.** `TenantAwareDataSource` binds
   the current tenant as a *session-level* Postgres setting on every connection
@@ -789,6 +793,13 @@ All defaulted, and all listed with their values in
 - **The AWS credentials are always injected**, so their placeholder defaults
   would override an EC2 instance role or anything else the SDK's credential
   chain would otherwise find. Blank them explicitly to use the chain.
+- **Unset object-store credentials mean the AWS credential chain, not "no
+  credentials".** `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY` are set in `.env`
+  for MinIO; delete them on a deployed host and the SDK finds
+  `~/.aws/credentials` or an EC2 instance role instead, so no long-lived key
+  needs to exist on the box. They deliberately do not inherit from
+  `MINIO_ROOT_USER` — see the comment in `application.yml` for why that
+  fallback was removed.
 
 ---
 
