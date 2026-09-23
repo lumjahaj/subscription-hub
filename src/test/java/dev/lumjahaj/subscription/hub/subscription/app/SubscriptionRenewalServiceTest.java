@@ -106,6 +106,35 @@ class SubscriptionRenewalServiceTest {
         assertThat(SubscriptionRenewalService.renewalFor(sub, NOW)).isEmpty();
     }
 
+    /**
+     * The new period's length comes from the plan being moved onto. Taking it
+     * from the plan being left would put a yearly subscription in a one-month
+     * period and bill it twelve times a year.
+     */
+    @Test
+    void renewalFor_takesTheIntervalFromAScheduledPlanChange() {
+        Instant oldEnd = Instant.parse("2026-02-14T00:00:00Z");
+        SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, oldEnd, oldEnd);
+
+        PlanEntity annual = new PlanEntity();
+        annual.setIntervalUnit(IntervalUnit.YEAR);
+        annual.setIntervalCount(1);
+        sub.setPendingPlan(annual);
+
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW))
+                .contains(new Renewal(oldEnd, Instant.parse("2027-02-14T00:00:00Z")));
+    }
+
+    @Test
+    void renewalFor_withNoScheduledChange_staysOnTheCurrentPlansInterval() {
+        Instant oldEnd = Instant.parse("2026-02-14T00:00:00Z");
+        SubscriptionEntity sub = subscription(SubscriptionStatus.ACTIVE, oldEnd, oldEnd);
+
+        assertThat(SubscriptionRenewalService.effectivePlanOf(sub)).isSameAs(sub.getPlan());
+        assertThat(SubscriptionRenewalService.renewalFor(sub, NOW))
+                .contains(new Renewal(oldEnd, Instant.parse("2026-03-14T00:00:00Z")));
+    }
+
     @Test
     void renewalFor_neverModifiesTheSubscription() {
         // A modified managed entity is written at commit, unconditionally -

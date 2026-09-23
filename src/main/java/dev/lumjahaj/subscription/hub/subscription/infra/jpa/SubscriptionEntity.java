@@ -27,6 +27,15 @@ public class SubscriptionEntity extends TenantScoped {
     @JoinColumn(name = "plan_id", nullable = false)
     private PlanEntity plan;
 
+    // The plan this subscription moves onto at its next renewal, or null.
+    // Never written by loading this entity and saving it: it is set through
+    // SubscriptionRepository.setPendingPlanIfPending and cleared by
+    // renewIfCurrent, both conditional updates, for the same reason every
+    // other field here is (see SubscriptionRepository).
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "pending_plan_id")
+    private PlanEntity pendingPlan;
+
     // NAMED_ENUM tells Hibernate to bind this as the native Postgres
     // subscription_status type, not varchar — same category of bug as
     // PlanEntitlement.valueJson needing @JdbcTypeCode(SqlTypes.JSON).
@@ -59,6 +68,8 @@ public class SubscriptionEntity extends TenantScoped {
     public void setCustomer(CustomerEntity customer) { this.customer = customer; }
     public PlanEntity getPlan() { return plan; }
     public void setPlan(PlanEntity plan) { this.plan = plan; }
+    public PlanEntity getPendingPlan() { return pendingPlan; }
+    public void setPendingPlan(PlanEntity pendingPlan) { this.pendingPlan = pendingPlan; }
     public SubscriptionStatus getStatus() { return status; }
     public void setStatus(SubscriptionStatus status) { this.status = status; }
     public Instant getStartAt() { return startAt; }

@@ -117,7 +117,95 @@ public class SubscriptionService {
         });
     }
 
+    /**
+     * Schedules the plan this subscription moves onto at its next renewal.
+     *
+     * Nothing changes now, deliberately. InvoiceCalculator reads the plan's
+     * price when an invoice is generated, so swapping the plan on the spot
+     * would bill the whole current period - which the customer spent on the old
+     * plan - at the new price. BillingCycleJob invoices before it renews, so
+     * deferring the swap to the renewal makes that mis-billing impossible
+     * rather than merely unlikely.
+     *
+     * Asking for the plan the subscription is already on clears any scheduled
+     * change instead of scheduling a no-op: "stay on this plan" is what the
+     * caller means by it.
+     */
+    @Transactional
+    public SubscriptionEntity schedulePlanChange(UUID id, String planCode) {
+        PlanEntity requested = plans.findByTenantIdAndCode(TenantContext.getTenantId(), planCode)
+                .orElseThrow(() -> new ResourceNotFoundException("Plan", planCode));
+        return setPendingPlan(id, requested);
+    }
+
+    /** Drops a scheduled plan change. A subscription with none is an untouched no-op. */
+    @Transactional
+    public SubscriptionEntity cancelPlanChange(UUID id) {
+        return setPendingPlan(id, null);
+    }
+
+    /**
+     * The same compare-and-set shape as {@link #transition}, keyed on the
+     * pending plan rather than the status, because that is what a renewal
+     * racing this request also writes.
+     *
+     * A request whose intent is already satisfied writes nothing at all - no
+     * update, no audit event, no bumped updatedAt - per the rule that only real
+     * changes are recorded. That is also why this is a conditional update and
+     * not @Version: scheduling a change that is already scheduled should be the
+     * no-op the caller expects, not a 409.
+     */
+    private SubscriptionEntity setPendingPlan(UUID id, PlanEntity requested) {
+        String tenantId = TenantContext.getTenantId();
+        SubscriptionEntity subscription = findOwned(id);
+        for (int attempt = 0; attempt < MAX_TRANSITION_ATTEMPTS; attempt++) {
+            SubscriptionStatus status = subscription.getStatus();
+            if (!PLAN_CHANGEABLE.contains(status)) {
+                throw new InvalidSubscriptionStateException("change plan", status);
+            }
+
+            PlanEntity current = subscription.getPlan();
+            PlanEntity pending = subscription.getPendingPlan();
+            PlanEntity target = requested != null && requested.getId().equals(current.getId()) ? null : requested;
+
+            if (samePlan(pending, target)) {
+                return subscription;
+            }
+            if (subscriptions.setPendingPlanIfPending(tenantId, id, pending, target)) {
+                if (target != null) {
+                    audit.record(AuditEventType.SUBSCRIPTION_PLAN_CHANGE_SCHEDULED, id, Map.of(
+                            "from", current.getCode(),
+                            "to", target.getCode()));
+                } else {
+                    audit.record(AuditEventType.SUBSCRIPTION_PLAN_CHANGE_CANCELED, id, Map.of(
+                            "canceled", pending.getCode()));
+                }
+                return subscription;
+            }
+            subscription = subscriptions.findCurrentByTenantIdAndId(tenantId, id)
+                    .orElseThrow(() -> new ResourceNotFoundException("Subscription", id.toString()));
+        }
+        throw new OptimisticLockingFailureException(
+                "Subscription " + id + " kept changing while trying to change its plan");
+    }
+
+    private static boolean samePlan(PlanEntity a, PlanEntity b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        return a.getId().equals(b.getId());
+    }
+
     private static final Set<SubscriptionStatus> CANCELABLE = EnumSet.complementOf(EnumSet.of(SubscriptionStatus.CANCELED));
+    /**
+     * Every status but CANCELED. A scheduled change applies at the
+     * subscription's next renewal, whenever that comes - a PAUSED or PAST_DUE
+     * subscription simply holds it until resume or dunning recovery, since
+     * SubscriptionRenewalService.renewalFor already gates on TRIALING/ACTIVE.
+     * Only a canceled subscription will never renew.
+     */
+    private static final Set<SubscriptionStatus> PLAN_CHANGEABLE =
+            EnumSet.complementOf(EnumSet.of(SubscriptionStatus.CANCELED));
     private static final Set<SubscriptionStatus> PAUSABLE = EnumSet.of(SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING);
     private static final Set<SubscriptionStatus> RESUMABLE = EnumSet.of(SubscriptionStatus.PAUSED);
     private static final int MAX_TRANSITION_ATTEMPTS = 3;

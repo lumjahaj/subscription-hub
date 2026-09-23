@@ -33,6 +33,15 @@ public enum AuditEventType {
     SUBSCRIPTION_PAST_DUE(AuditEntityType.SUBSCRIPTION),
     SUBSCRIPTION_RECOVERED(AuditEntityType.SUBSCRIPTION),
 
+    // A plan change is asked for once and takes effect later, at the next
+    // renewal, so it is three events rather than one. The last is the only
+    // record that it happened at all: applying it clears
+    // subscription.pending_plan_id, and nothing else in the database keeps
+    // the plan the subscription used to be on.
+    SUBSCRIPTION_PLAN_CHANGE_SCHEDULED(AuditEntityType.SUBSCRIPTION),
+    SUBSCRIPTION_PLAN_CHANGE_CANCELED(AuditEntityType.SUBSCRIPTION),
+    SUBSCRIPTION_PLAN_CHANGED(AuditEntityType.SUBSCRIPTION),
+
     INVOICE_ISSUED(AuditEntityType.INVOICE),
     INVOICE_PAID(AuditEntityType.INVOICE),
     INVOICE_UNCOLLECTIBLE(AuditEntityType.INVOICE),

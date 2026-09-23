@@ -2,6 +2,7 @@ package dev.lumjahaj.subscription.hub.subscription.api;
 
 import dev.lumjahaj.subscription.hub.auth.api.Authorize;
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionCreateRequest;
+import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionPlanChangeRequest;
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionResponse;
 import dev.lumjahaj.subscription.hub.subscription.api.mapper.SubscriptionMapper;
 import dev.lumjahaj.subscription.hub.subscription.app.SubscriptionService;
@@ -63,6 +64,32 @@ public class SubscriptionController {
     public ResponseEntity<SubscriptionResponse> resume(@PathVariable UUID id) {
         SubscriptionEntity resumed = subscriptionService.resume(id);
         return ResponseEntity.ok(SubscriptionMapper.toResponse(resumed));
+    }
+
+    /**
+     * Schedules the plan change for the next renewal; re-sending it with a
+     * different plan replaces the schedule, and sending the plan the
+     * subscription is already on clears it.
+     *
+     * POST rather than PUT on a sub-resource, and no If-Match: this is an
+     * idempotent state command, so a caller whose intent is already satisfied
+     * gets the no-op rather than a precondition failure (CLAUDE.md §5).
+     */
+    @PostMapping("/{id}/change-plan")
+    @PreAuthorize(Authorize.COMMERCIAL)
+    public ResponseEntity<SubscriptionResponse> schedulePlanChange(
+            @PathVariable UUID id,
+            @Valid @RequestBody SubscriptionPlanChangeRequest request
+    ) {
+        SubscriptionEntity scheduled = subscriptionService.schedulePlanChange(id, request.planCode());
+        return ResponseEntity.ok(SubscriptionMapper.toResponse(scheduled));
+    }
+
+    @DeleteMapping("/{id}/change-plan")
+    @PreAuthorize(Authorize.COMMERCIAL)
+    public ResponseEntity<SubscriptionResponse> cancelPlanChange(@PathVariable UUID id) {
+        SubscriptionEntity cleared = subscriptionService.cancelPlanChange(id);
+        return ResponseEntity.ok(SubscriptionMapper.toResponse(cleared));
     }
 
     @GetMapping

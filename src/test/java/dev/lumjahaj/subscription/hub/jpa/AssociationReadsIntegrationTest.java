@@ -7,6 +7,7 @@ import dev.lumjahaj.subscription.hub.catalog.api.dto.PlanEntitlementCreateReques
 import dev.lumjahaj.subscription.hub.catalog.api.dto.ProductCreateRequest;
 import dev.lumjahaj.subscription.hub.customer.api.dto.CustomerCreateRequest;
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionCreateRequest;
+import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionPlanChangeRequest;
 import dev.lumjahaj.subscription.hub.testsupport.AbstractIntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -84,6 +85,34 @@ class AssociationReadsIntegrationTest extends AbstractIntegrationTest {
         assertThat(get("/api/subscriptions/" + f.subscriptionId()).get("planCode").asText()).isEqualTo(f.planCode());
     }
 
+    /**
+     * pendingPlan is the second lazy association on a subscription, and the
+     * only nullable one - so it is fetched as a LEFT JOIN and every test above
+     * (whose subscriptions have no pending change) already covers the null
+     * side. This covers the side that has to be loaded.
+     */
+    @Test
+    void subscription_allThreeFinders_carryThePendingPlanCode() {
+        Fixture f = fixture();
+        String targetPlan = "assoc-target-" + UUID.randomUUID().toString().substring(0, 8);
+        create("/api/plans",
+                new PlanCreateRequest(f.productCode(), targetPlan, "Association Target", "MONTH", 1, 2500L, "EUR", 0));
+
+        JsonNode scheduled = post("/api/subscriptions/" + f.subscriptionId() + "/change-plan",
+                new SubscriptionPlanChangeRequest(targetPlan));
+        assertThat(scheduled.get("pendingPlanCode").asText()).isEqualTo(targetPlan);
+
+        assertThat(get("/api/subscriptions/" + f.subscriptionId()).get("pendingPlanCode").asText())
+                .isEqualTo(targetPlan);
+        assertThat(get("/api/subscriptions?size=1000").get("content"))
+                .filteredOn(s -> s.get("id").asText().equals(f.subscriptionId().toString()))
+                .singleElement()
+                .satisfies(s -> assertThat(s.get("pendingPlanCode").asText()).isEqualTo(targetPlan));
+        assertThat(get("/api/subscriptions?customerId=" + f.customerId()).get("content"))
+                .singleElement()
+                .satisfies(s -> assertThat(s.get("pendingPlanCode").asText()).isEqualTo(targetPlan));
+    }
+
     @Test
     void invoiceList_bothFinders_carryTheLines() {
         Fixture f = fixture();
@@ -130,8 +159,12 @@ class AssociationReadsIntegrationTest extends AbstractIntegrationTest {
     }
 
     private JsonNode post(String path) {
+        return post(path, null);
+    }
+
+    private JsonNode post(String path, Object body) {
         ResponseEntity<JsonNode> response = restTemplate.exchange(
-                path, HttpMethod.POST, new HttpEntity<>(tenantHeaders(TENANT)), JsonNode.class);
+                path, HttpMethod.POST, new HttpEntity<>(body, tenantHeaders(TENANT)), JsonNode.class);
         assertThat(response.getStatusCode().is2xxSuccessful()).as("POST %s returned %s", path, response.getStatusCode()).isTrue();
         return response.getBody();
     }

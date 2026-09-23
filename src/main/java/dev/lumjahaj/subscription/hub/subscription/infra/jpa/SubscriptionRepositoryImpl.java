@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.subscription.infra.jpa;
 
+import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionRepository;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
 import jakarta.persistence.EntityManager;
@@ -64,18 +65,44 @@ public class SubscriptionRepositoryImpl implements SubscriptionRepository {
     }
 
     @Override
-    public boolean renewIfCurrent(String tenantId, UUID id, SubscriptionStatus expectedStatus, Instant expectedPeriodEnd,
-                                  Instant newPeriodStart, Instant newPeriodEnd) {
-        return refreshedIf(id, jpaRepository.renewIfCurrent(
-                tenantId, id, expectedStatus, expectedPeriodEnd, newPeriodStart, newPeriodEnd, Instant.now()) == 1);
+    public boolean setPendingPlanIfPending(String tenantId, UUID id, PlanEntity expectedPendingPlan,
+                                           PlanEntity newPendingPlan) {
+        return refreshedIf(id, jpaRepository.setPendingPlanIfPending(
+                tenantId, id, expectedPendingPlan, newPendingPlan, Instant.now()) == 1);
     }
 
     @Override
+    public boolean renewIfCurrent(String tenantId, UUID id, SubscriptionStatus expectedStatus, Instant expectedPeriodEnd,
+                                  PlanEntity expectedPendingPlan, PlanEntity newPlan,
+                                  Instant newPeriodStart, Instant newPeriodEnd) {
+        return refreshedIf(id, jpaRepository.renewIfCurrent(
+                tenantId, id, expectedStatus, expectedPeriodEnd, expectedPendingPlan, newPlan,
+                newPeriodStart, newPeriodEnd, Instant.now()) == 1);
+    }
+
+    /**
+     * Refreshes first, then queries - not the other way round, which is how
+     * this was written until pendingPlan existed.
+     *
+     * findByTenantIdAndId join-fetches plan and pendingPlan. A query never
+     * overwrites an entity the persistence context already holds, so if the
+     * row's pending_plan_id changed since this transaction read it, Hibernate
+     * assembles a row whose fetched association disagrees with the managed
+     * instance and throws EntityFilterException ("is filtered for
+     * association") rather than returning anything. Every caller here is on
+     * the retry path after a conditional update missed, which means another
+     * writer just changed the row - exactly when that mismatch is likely.
+     *
+     * Refreshing the managed instance first re-reads the row by id, with no
+     * fetch graph, so the query that follows finds the context already
+     * agreeing with the database. A plain scalar change (a status) never had
+     * this problem, which is why the old order held until a nullable
+     * association was added.
+     */
+    @Override
     public Optional<SubscriptionEntity> findCurrentByTenantIdAndId(String tenantId, UUID id) {
-        return jpaRepository.findByTenantIdAndId(tenantId, id).map(subscription -> {
-            entityManager.refresh(subscription);
-            return subscription;
-        });
+        refreshIfLoaded(id);
+        return jpaRepository.findByTenantIdAndId(tenantId, id);
     }
 
     /**
@@ -91,11 +118,20 @@ public class SubscriptionRepositoryImpl implements SubscriptionRepository {
      */
     private boolean refreshedIf(UUID id, boolean changed) {
         if (changed) {
-            SubscriptionEntity loaded = entityManager.find(SubscriptionEntity.class, id);
-            if (loaded != null) {
-                entityManager.refresh(loaded);
-            }
+            refreshIfLoaded(id);
         }
         return changed;
+    }
+
+    /**
+     * Re-reads the row into whatever instance the persistence context holds.
+     * find() by id uses no fetch graph, so it cannot hit the association
+     * mismatch described on findCurrentByTenantIdAndId.
+     */
+    private void refreshIfLoaded(UUID id) {
+        SubscriptionEntity loaded = entityManager.find(SubscriptionEntity.class, id);
+        if (loaded != null) {
+            entityManager.refresh(loaded);
+        }
     }
 }

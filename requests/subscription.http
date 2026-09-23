@@ -231,3 +231,143 @@ Authorization: Bearer {{demoToken}}
 ### Cancel — unknown subscription id (expects 404 SUBSCRIPTION_NOT_FOUND)
 POST {{baseUrl}}/api/subscriptions/00000000-0000-0000-0000-000000000000/cancel
 Authorization: Bearer {{acmeToken}}
+
+###############################################################################
+# Plan changes
+#
+# A plan change is scheduled, never immediate. The subscription stays on its
+# current plan and in its current period; the swap happens at the next renewal,
+# which BillingCycleJob runs *after* invoicing the closed period. That ordering
+# is what keeps the closed period billed at the price the customer was actually
+# on - an immediate swap would reprice a period already spent on the old plan.
+###############################################################################
+
+### Setup — an annual plan to move onto. A different interval makes the effect
+### visible: after the change applies, the new period is a year, not a month.
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "productCode": "sub-test-product",
+  "code": "sub-annual",
+  "name": "Annual",
+  "intervalUnit": "YEAR",
+  "amountCents": 19999,
+  "currency": "USD"
+}
+
+### Setup — a subscription to change, on the no-trial monthly plan
+POST {{baseUrl}}/api/subscriptions
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "customerId": "{{customerId}}",
+  "planCode": "sub-notrial-monthly"
+}
+
+> {%
+    client.global.set("planChangeSubId", response.body.id);
+%}
+
+### Schedule a plan change (expects 200; planCode unchanged,
+### pendingPlanCode = sub-annual, period and nextRenewal untouched)
+POST {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "planCode": "sub-annual"
+}
+
+### Schedule the same change again (expects 200 and an identical body —
+### an idempotent command, so a satisfied intent is a no-op, not a 409.
+### updatedAt must not move.)
+POST {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "planCode": "sub-annual"
+}
+
+### Read it back (expects 200, pendingPlanCode = sub-annual)
+GET {{baseUrl}}/api/subscriptions/{{planChangeSubId}}
+Authorization: Bearer {{acmeToken}}
+
+### Cancel the scheduled change (expects 200, pendingPlanCode null)
+DELETE {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Authorization: Bearer {{acmeToken}}
+
+### Cancel it again (expects 200 and no change — nothing was scheduled)
+DELETE {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Authorization: Bearer {{acmeToken}}
+
+### Re-schedule, then ask for the plan it is already on (expects 200 with
+### pendingPlanCode null) — "stay on this plan" clears the schedule rather
+### than storing a change to nothing.
+POST {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "planCode": "sub-annual"
+}
+
+###
+POST {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "planCode": "sub-notrial-monthly"
+}
+
+### Unknown planCode (expects 404 PLAN_NOT_FOUND)
+POST {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "planCode": "does-not-exist"
+}
+
+### Missing planCode (expects 400 VALIDATION_ERROR)
+POST {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+}
+
+### A CANCELED subscription (expects 409 INVALID_SUBSCRIPTION_STATE) —
+### it will never renew, so there is no boundary to schedule for.
+POST {{baseUrl}}/api/subscriptions/{{transitionSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{acmeToken}}
+
+{
+  "planCode": "sub-annual"
+}
+
+### Tenant isolation — demo schedules a change on acme's subscription
+### (expects 404 SUBSCRIPTION_NOT_FOUND; must not leak or succeed)
+POST {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Content-Type: application/json
+Authorization: Bearer {{demoToken}}
+
+{
+  "planCode": "sub-annual"
+}
+
+### Tenant isolation — demo clears a change on acme's subscription
+### (expects 404 SUBSCRIPTION_NOT_FOUND)
+DELETE {{baseUrl}}/api/subscriptions/{{planChangeSubId}}/change-plan
+Authorization: Bearer {{demoToken}}
+
+### Audit trail (expects SUBSCRIPTION_PLAN_CHANGE_SCHEDULED /
+### _CANCELED entries; SUBSCRIPTION_PLAN_CHANGED with actorType SYSTEM
+### appears only once BillingCycleJob has applied the change)
+GET {{baseUrl}}/api/audit-events?entityType=SUBSCRIPTION&entityId={{planChangeSubId}}
+Authorization: Bearer {{acmeToken}}

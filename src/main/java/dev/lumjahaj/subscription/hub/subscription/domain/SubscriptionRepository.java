@@ -1,5 +1,6 @@
 package dev.lumjahaj.subscription.hub.subscription.domain;
 
+import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -38,12 +39,35 @@ public interface SubscriptionRepository {
     boolean cancelIfStatus(String tenantId, UUID id, SubscriptionStatus expected, Instant canceledAt);
 
     /**
+     * Schedules the plan the subscription moves onto at its next renewal, or
+     * clears it with a null newPendingPlan, only if the row still holds the
+     * pending plan the caller read. Refused outright on a CANCELED
+     * subscription, which will never renew.
+     *
+     * Nothing takes effect here: the plan is swapped by renewIfCurrent. That is
+     * deliberate, because InvoiceCalculator reads the plan's price when the
+     * invoice is generated and BillingCycleJob invoices before it renews, so
+     * deferring the swap is what keeps the closed period billed at the price
+     * the customer was actually on.
+     */
+    boolean setPendingPlanIfPending(String tenantId, UUID id, PlanEntity expectedPendingPlan,
+                                    PlanEntity newPendingPlan);
+
+    /**
      * Rolls the subscription into its next period, and makes it ACTIVE, only if
-     * it is still in the status and the period the renewal was computed from. A
-     * cancellation, a pause or an earlier renewal in between makes this a no-op
-     * instead of something it silently overwrites.
+     * it is still in the status, the period and the pending plan the renewal was
+     * computed from. A cancellation, a pause, an earlier renewal or a plan
+     * change in between makes this a no-op instead of something it silently
+     * overwrites.
+     *
+     * newPlan is the plan the subscription should be on afterwards - the pending
+     * one if there is one, otherwise the current one - and any pending change is
+     * cleared. It is applied here rather than in its own statement because the
+     * new period's length was computed from that plan's interval, so the two
+     * have to commit together or not at all.
      */
     boolean renewIfCurrent(String tenantId, UUID id, SubscriptionStatus expectedStatus, Instant expectedPeriodEnd,
+                           PlanEntity expectedPendingPlan, PlanEntity newPlan,
                            Instant newPeriodStart, Instant newPeriodEnd);
 
     /**

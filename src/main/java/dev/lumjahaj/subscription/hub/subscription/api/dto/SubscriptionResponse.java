@@ -9,6 +9,9 @@ public record SubscriptionResponse(
         UUID id,
         UUID customerId,
         String planCode,
+        // The plan this subscription moves onto at its next renewal, or null.
+        // Nothing about the current period changes until then.
+        String pendingPlanCode,
         SubscriptionStatus status,
         Instant startAt,
         Instant currentPeriodStart,

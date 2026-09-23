@@ -20,6 +20,7 @@ public final class SubscriptionMapper {
                 entity.getId(),
                 entity.getCustomer().getId(),
                 entity.getPlan().getCode(),
+                entity.getPendingPlan() != null ? entity.getPendingPlan().getCode() : null,
                 entity.getStatus(),
                 entity.getStartAt(),
                 entity.getCurrentPeriodStart(),

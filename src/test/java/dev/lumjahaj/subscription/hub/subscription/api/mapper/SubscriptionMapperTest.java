@@ -3,6 +3,7 @@ package dev.lumjahaj.subscription.hub.subscription.api.mapper;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.customer.infra.jpa.CustomerEntity;
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionCreateRequest;
+import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionPlanChangeRequest;
 import dev.lumjahaj.subscription.hub.subscription.api.dto.SubscriptionResponse;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionStatus;
 import dev.lumjahaj.subscription.hub.subscription.infra.jpa.SubscriptionEntity;
@@ -45,6 +46,7 @@ class SubscriptionMapperTest extends MapperValidationSupport {
         assertThat(response.id()).isEqualTo(entity.getId());
         assertThat(response.customerId()).isEqualTo(customer.getId());
         assertThat(response.planCode()).isEqualTo("pro-monthly");
+        assertThat(response.pendingPlanCode()).as("no scheduled plan change").isNull();
         assertThat(response.status()).isEqualTo(SubscriptionStatus.TRIALING);
         assertThat(response.startAt()).isEqualTo(entity.getStartAt());
         assertThat(response.currentPeriodStart()).isEqualTo(entity.getCurrentPeriodStart());
@@ -80,6 +82,39 @@ class SubscriptionMapperTest extends MapperValidationSupport {
         assertThat(response.status()).isEqualTo(SubscriptionStatus.CANCELED);
         assertThat(response.cancelAt()).isEqualTo(entity.getCancelAt());
         assertThat(response.canceledAt()).isEqualTo(entity.getCanceledAt());
+    }
+
+    @Test
+    void toResponse_mapsAScheduledPlanChangeToItsCode() {
+        CustomerEntity customer = new CustomerEntity();
+        customer.setId(UUID.randomUUID());
+
+        PlanEntity plan = new PlanEntity();
+        plan.setCode("basic-monthly");
+        PlanEntity pending = new PlanEntity();
+        pending.setCode("pro-monthly");
+
+        SubscriptionEntity entity = new SubscriptionEntity();
+        entity.setId(UUID.randomUUID());
+        entity.setCustomer(customer);
+        entity.setPlan(plan);
+        entity.setPendingPlan(pending);
+        entity.setStatus(SubscriptionStatus.ACTIVE);
+
+        SubscriptionResponse response = SubscriptionMapper.toResponse(entity);
+
+        // The plan in force is still the old one: nothing moves until renewal.
+        assertThat(response.planCode()).isEqualTo("basic-monthly");
+        assertThat(response.pendingPlanCode()).isEqualTo("pro-monthly");
+    }
+
+    @Test
+    void planChangeRequest_rejectsBlankPlanCode() {
+        var request = new SubscriptionPlanChangeRequest("  ");
+
+        Set<ConstraintViolation<SubscriptionPlanChangeRequest>> violations = VALIDATOR.validate(request);
+
+        assertThat(violations).isNotEmpty();
     }
 
     @Test

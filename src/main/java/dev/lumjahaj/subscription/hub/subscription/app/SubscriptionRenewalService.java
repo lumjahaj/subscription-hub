@@ -1,5 +1,7 @@
 package dev.lumjahaj.subscription.hub.subscription.app;
 
+import dev.lumjahaj.subscription.hub.audit.app.AuditService;
+import dev.lumjahaj.subscription.hub.audit.domain.AuditEventType;
 import dev.lumjahaj.subscription.hub.catalog.infra.jpa.PlanEntity;
 import dev.lumjahaj.subscription.hub.common.metrics.AfterCommit;
 import dev.lumjahaj.subscription.hub.subscription.domain.SubscriptionRepository;
@@ -12,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -19,10 +22,12 @@ import java.util.UUID;
 public class SubscriptionRenewalService {
 
     private final SubscriptionRepository subscriptions;
+    private final AuditService audit;
     private final Counter renewals;
 
-    public SubscriptionRenewalService(SubscriptionRepository subscriptions, MeterRegistry registry) {
+    public SubscriptionRenewalService(SubscriptionRepository subscriptions, AuditService audit, MeterRegistry registry) {
         this.subscriptions = subscriptions;
+        this.audit = audit;
         // Renewals are deliberately not audited (high volume, derivable), so
         // they get their own counter rather than appearing in audit.events.
         this.renewals = Counter.builder("subscription.renewals")
@@ -61,11 +66,32 @@ public class SubscriptionRenewalService {
         if (renewal.isEmpty()) {
             return false;
         }
+
+        // Read before the update: renewIfCurrent refreshes the entity on
+        // success, so afterwards getPlan() is already the new plan and
+        // getPendingPlan() is null.
+        PlanEntity pendingPlan = subscription.getPendingPlan();
+        String fromPlanCode = subscription.getPlan().getCode();
+
         boolean changed = subscriptions.renewIfCurrent(tenantId, subscriptionId,
                 subscription.getStatus(), subscription.getCurrentPeriodEnd(),
+                pendingPlan, effectivePlanOf(subscription),
                 renewal.get().periodStart(), renewal.get().periodEnd());
         if (changed) {
             AfterCommit.run(renewals::increment);
+            if (pendingPlan != null) {
+                // Audited although renewals themselves are not: the pending
+                // column is cleared by the update, so after this commits
+                // nothing else in the database says the plan ever changed.
+                // That makes it neither high volume nor derivable, which is
+                // the test the audit exclusion actually applies.
+                //
+                // SYSTEM because a job applies it, whoever asked for it - the
+                // same reason settlement and dunning record SYSTEM.
+                audit.recordSystem(AuditEventType.SUBSCRIPTION_PLAN_CHANGED, subscriptionId, Map.of(
+                        "from", fromPlanCode,
+                        "to", pendingPlan.getCode()));
+            }
         }
         return changed;
     }
@@ -103,8 +129,25 @@ public class SubscriptionRenewalService {
         }
 
         Instant oldPeriodEnd = subscription.getCurrentPeriodEnd();
-        PlanEntity plan = subscription.getPlan();
+        PlanEntity plan = effectivePlanOf(subscription);
         Instant newPeriodEnd = BillingPeriods.addInterval(oldPeriodEnd, plan.getIntervalUnit(), plan.getIntervalCount());
         return Optional.of(new Renewal(oldPeriodEnd, newPeriodEnd));
+    }
+
+    /**
+     * The plan the subscription is on for the period a renewal opens: the one
+     * scheduled to take effect, if any, otherwise the current one.
+     *
+     * The new period's *length* comes from here, which is why a scheduled
+     * change has to be applied by the same statement that writes the period. A
+     * monthly-to-yearly change whose plan swap happened separately, or not at
+     * all, would leave a yearly subscription in a one-month period.
+     *
+     * Note what this does not affect: the closed period being invoiced right
+     * now. BillingCycleJob invoices before it renews, so that invoice has
+     * already been generated from the old plan's price by the time this runs.
+     */
+    static PlanEntity effectivePlanOf(SubscriptionEntity subscription) {
+        return subscription.getPendingPlan() != null ? subscription.getPendingPlan() : subscription.getPlan();
     }
 }
