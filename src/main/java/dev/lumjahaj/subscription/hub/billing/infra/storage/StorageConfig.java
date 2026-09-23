@@ -4,6 +4,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -64,8 +66,7 @@ public class StorageConfig {
     @Bean
     public S3Client s3Client() {
         S3ClientBuilder builder = S3Client.builder()
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(accessKey, secretKey)))
+                .credentialsProvider(credentialsProvider())
                 .forcePathStyle(pathStyle)
                 .region(Region.of(region));
 
@@ -73,5 +74,36 @@ public class StorageConfig {
             builder.endpointOverride(URI.create(endpoint));
         }
         return builder.build();
+    }
+
+    /**
+     * Static credentials when an access key is configured, the SDK's default
+     * chain otherwise.
+     *
+     * This was unconditionally static, which meant the S3 client could never
+     * use a role: on EC2 an instance profile would have been resolved by the
+     * chain and then ignored, because the chain was never consulted. It was
+     * the fourth MinIO-shaped assumption in this class, alongside the
+     * endpoint, the region and path-style addressing.
+     *
+     * Blank is therefore meaningful rather than missing, and the two
+     * deployment halves need no different code: the chain finds
+     * ~/.aws/credentials on a developer machine and the instance profile on
+     * EC2. MinIO keeps supplying a key, so the local path is unchanged.
+     *
+     * Note the neighbouring SQS client reaches the same place by a different
+     * route — it has no explicit builder here at all, so Spring Cloud AWS
+     * constructs it from spring.cloud.aws.credentials, whose non-empty
+     * defaults have to be blanked for the chain to win.
+     *
+     * Package-private so it can be unit-tested: the provider a built
+     * S3Client ended up with is not publicly readable.
+     */
+    AwsCredentialsProvider credentialsProvider() {
+        if (accessKey == null || accessKey.isBlank()) {
+            return DefaultCredentialsProvider.create();
+        }
+        return StaticCredentialsProvider.create(
+                AwsBasicCredentials.create(accessKey, secretKey));
     }
 }

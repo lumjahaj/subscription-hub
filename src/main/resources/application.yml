@@ -170,10 +170,27 @@ billing:
     # MinIO serves path-style (host/bucket/key). Virtual-host style
     # (bucket.host/key) is the SDK default and needs a DNS entry per bucket.
     path-style: ${STORAGE_PATH_STYLE:true}
-    # Named for the store rather than the vendor: MinIO's root credentials
-    # locally, an R2 or S3 key pair anywhere else.
-    access-key: ${STORAGE_ACCESS_KEY:${MINIO_ROOT_USER}}
-    secret-key: ${STORAGE_SECRET_KEY:${MINIO_ROOT_PASSWORD}}
+    # Unset means "use the SDK's default credential chain" - ~/.aws/credentials
+    # on a developer machine, an instance role on EC2. MinIO's key pair is set
+    # explicitly in .env instead.
+    #
+    # These deliberately do NOT default to ${MINIO_ROOT_USER}. That nested
+    # fallback meant a deployed host had to set them to an *empty* value to opt
+    # out, because a Spring default applies to an absent property and not an
+    # empty one - and on Windows that is not even expressible: the README's
+    # PowerShell .env loader calls Environment.SetEnvironmentVariable, which
+    # deletes a variable given an empty value rather than setting it. So the
+    # opt-out silently became the fallback, and MinIO's credentials went to S3.
+    # Stating the local key pair costs one duplicated value and fails loudly on
+    # a laptop; the fallback failed quietly in production.
+    access-key: ${STORAGE_ACCESS_KEY:}
+    secret-key: ${STORAGE_SECRET_KEY:}
+    # Create the bucket on first write if it is missing. True locally and in
+    # tests, where not needing a provisioning step is the point; false
+    # wherever the bucket is infrastructure, like the SQS queues. Off, the
+    # write path makes no headBucket or createBucket call at all, so the
+    # deployed credential needs no s3:ListBucket grant.
+    create-bucket-if-missing: ${STORAGE_CREATE_BUCKET:true}
 
 payment:
   # fake: in-process, no network or secrets - the default, and what tests use.
@@ -333,6 +350,14 @@ spring:
     # Strict, unlike dev: nothing here can legitimately be out of order, so an
     # out-of-order migration is a real signal rather than an expected state.
     out-of-order: false
+
+billing:
+  pdf:
+    # The bucket is infrastructure here, provisioned before a deploy touches
+    # it - the same rule the SQS queues already follow. Off, the write path
+    # issues no headBucket or createBucket, so the deployed credential needs
+    # only GetObject and PutObject.
+    create-bucket-if-missing: false
 
 springdoc:
   # The API's shape, and the existence of every endpoint, is not public
