@@ -1,3 +1,22 @@
+# "Unset is the deployed value."
+#
+# Most settings here default to what local development wants, and a deployed
+# host overrides them. Three cannot work that way, because what a deployed host
+# needs is for the setting to be *absent*: the object-store endpoint, the SQS
+# endpoint, and the AWS credentials all mean "ask the SDK to work it out" when
+# nothing is set - the real regional endpoint, and the default credential chain.
+#
+# Defaulting those to a localhost value and expecting a deployed host to blank
+# them does not work, and fails silently. An empty environment variable is not
+# portable: the README's PowerShell .env loader calls
+# Environment.SetEnvironmentVariable, which DELETES a variable given an empty
+# value rather than setting it, so "set but empty" collapses back to "absent"
+# and the localhost default wins. That shipped a bucket URL of
+# <bucket>.localhost on the first real deployment attempt.
+#
+# So those three default to unset and .env states the local value instead. The
+# rule for anything added later: if the deployed value is "nothing", the
+# default must be nothing, and local must be explicit.
 spring:
   application:
     name: subscription-hub
@@ -106,18 +125,16 @@ spring:
       region:
         static: ${AWS_REGION:eu-central-1}
       credentials:
-        # Static and empty-safe by default: ElasticMQ ignores credentials
-        # entirely, so a clean clone needs none to run the queue locally.
-        # Real SQS needs real ones, supplied the same way as everywhere else.
-        #
-        # Beware: these are always injected, so the "test" default would
-        # override an EC2 instance role, or anything else the SDK's credential
-        # chain would otherwise find. Blank them explicitly to use the chain.
-        access-key: ${AWS_ACCESS_KEY_ID:test}
-        secret-key: ${AWS_SECRET_ACCESS_KEY:test}
+        # Unset means the SDK's default credential chain - ~/.aws/credentials,
+        # or an EC2 instance role. ElasticMQ ignores credentials entirely, so
+        # .env supplies placeholder values for local use, and the test suite
+        # states its own rather than relying on the developer's machine.
+        access-key: ${AWS_ACCESS_KEY_ID:}
+        secret-key: ${AWS_SECRET_ACCESS_KEY:}
       sqs:
-        # Empty means the real regional SQS endpoint.
-        endpoint: ${SQS_ENDPOINT:http://localhost:9324}
+        # Unset means the real regional SQS endpoint. ElasticMQ needs its own
+        # value, which .env supplies.
+        endpoint: ${SQS_ENDPOINT:}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -161,9 +178,12 @@ billing:
     due-days: ${BILLING_INVOICE_DUE_DAYS:14}
   pdf:
     bucket: ${STORAGE_BUCKET:invoices}
-    # Empty resolves the real endpoint for the region, i.e. AWS S3 proper.
-    # MinIO, R2 and Backblaze each need their own value here.
-    endpoint: ${STORAGE_ENDPOINT:http://localhost:9000}
+    # Unset resolves the real endpoint for the region, i.e. AWS S3 proper.
+    # MinIO needs its own value, which .env supplies.
+    #
+    # The default is unset rather than localhost on purpose - see "unset is the
+    # deployed value" at the top of this file.
+    endpoint: ${STORAGE_ENDPOINT:}
     # MinIO ignores the region but the SDK refuses to build a client without
     # one; R2 requires the literal "auto"; real S3 wants the bucket's region.
     region: ${STORAGE_REGION:us-east-1}

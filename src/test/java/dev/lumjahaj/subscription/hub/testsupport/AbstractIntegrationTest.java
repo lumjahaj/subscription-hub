@@ -83,6 +83,16 @@ import static org.assertj.core.api.Assertions.assertThat;
         // settle the deliberately-stuck PENDING payments other tests leave
         // behind - DunningIntegrationTest parks one on purpose.
         "payment.reconciliation.cron=-",
+        // ElasticMQ ignores credentials entirely, but Spring Cloud AWS still
+        // has to resolve *something*. These default to unset now, meaning the
+        // SDK's default credential chain - which on a developer machine finds
+        // ~/.aws/credentials and passes, and on CI finds nothing and throws
+        // "Unable to load credentials from any of the providers". Stating them
+        // here keeps the suite independent of whether the machine running it
+        // happens to have AWS configured, which is exactly the kind of
+        // works-locally-fails-on-CI gap the pinned-image rule exists for.
+        "spring.cloud.aws.credentials.access-key=test",
+        "spring.cloud.aws.credentials.secret-key=test",
         // JwtConfig resolves this eagerly and rejects anything under 32
         // bytes, so without it every context fails to build - the same
         // trap billing.pdf.* hit. A fixed test secret also keeps tokens
