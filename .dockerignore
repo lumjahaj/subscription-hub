@@ -1,0 +1,32 @@
+# Keep the build context small and, more importantly, keep secrets out of it.
+#
+# .env is the one that matters: it is gitignored, so it never reaches a clone,
+# but a Docker build sends the whole working directory to the daemon and COPY
+# would happily bake it into a layer. Deployed configuration arrives as
+# environment variables at run time, never in the image.
+.env
+.env.*
+!.env.example
+
+# Build output. target/ is rebuilt inside the builder stage; copying a local
+# one in would both bloat the context and risk shipping a stale jar.
+target/
+**/target/
+
+.git/
+.github/
+.gitignore
+.idea/
+*.iml
+.vscode/
+.mvn/wrapper/maven-wrapper.jar
+
+# Local-only infrastructure and tooling. None of it is part of the image:
+# compose runs the stand-ins a developer needs, and the deployed instance
+# talks to the managed services instead.
+docker-compose.yml
+docker/
+requests/
+http-client.env.json
+*.md
+!README.md

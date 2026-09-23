@@ -1,0 +1,77 @@
+# The deployed stack: the application and a Cloudflare Tunnel, and nothing else.
+#
+# Everything docker-compose.yml runs locally has a managed counterpart by now -
+# Postgres is Neon, the object store is S3, the queue is SQS, SMTP is SES, and
+# metrics go to Grafana Cloud. What is left is one container that needs no
+# inbound network at all.
+#
+# Usage on the box:
+#   docker compose -f docker-compose.staging.yml up -d
+#
+# Configuration comes from a .env file sitting next to this one, holding the
+# managed-service settings. It is never baked into the image: see .dockerignore.
+
+services:
+  app:
+    # Built elsewhere and pulled, not built here. A free-tier instance has
+    # 1 GiB of RAM, and a Maven build needs more than that - it would OOM on
+    # the box. APP_IMAGE points at the registry tag; see the deploy notes.
+    image: ${APP_IMAGE:-subscription-hub:staging}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SPRING_PROFILES_ACTIVE: staging
+      # Deliberately NOT set here: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+      # STORAGE_ACCESS_KEY and STORAGE_SECRET_KEY. Unset means the SDK's
+      # default credential chain, which on EC2 resolves the instance role, so
+      # no long-lived key exists on this machine. Setting any of them - even to
+      # an empty string in some shells - silently beats the instance profile.
+      # See "unset is the deployed value" at the top of application.yml.
+      SERVER_PORT: 8080
+    # No `ports:` mapping on purpose. cloudflared reaches the app over the
+    # compose network, so nothing listens on a public interface and the EC2
+    # security group needs no inbound rule whatsoever.
+    expose:
+      - "8080"
+    # Matches the free-tier instance, so the JVM's MaxRAMPercentage resolves to
+    # the same heap here as it will in production rather than to the host's
+    # total memory.
+    mem_limit: 900m
+    # The application handles SIGTERM itself (server.shutdown: graceful), so
+    # give it room to finish an in-flight request or a scheduled job rather
+    # than the default 10s.
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Dials out to Cloudflare and serves the app through the tunnel, which is
+  # what makes the security group inbound-free and gives TLS without managing
+  # a certificate on the box.
+  #
+  # A QUICK tunnel, because a named one needs a domain in a Cloudflare account
+  # and this deployment has none. Read the generated hostname from the logs:
+  #
+  #   docker compose -f docker-compose.staging.yml logs cloudflared | grep trycloudflare
+  #
+  # Two consequences, both accepted deliberately rather than overlooked:
+  #
+  #  - The hostname is random and CHANGES ON EVERY RESTART. Nothing can depend
+  #    on it, which is also why OPENAPI_SERVER_URL is not worth setting here.
+  #  - There is no WAF, so the rate-limit rule that would have protected
+  #    /api/auth/token does not exist. That endpoint does a bcrypt
+  #    verification per call and has none of its own, so it is a CPU-burn
+  #    target for anyone who learns the URL. The mitigation is that the URL is
+  #    random, unindexed and short-lived - which is obscurity, not a control.
+  #    Do not leave this running unattended, and do not publish the link.
+  #
+  # Switching to a named tunnel later is this command plus a token:
+  #   command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+  cloudflared:
+    image: cloudflare/cloudflared:2025.8.1
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://app:8080
+    depends_on:
+      - app
