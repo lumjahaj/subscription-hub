@@ -18,6 +18,21 @@
 # be LF even on Windows: with CRLF every value would end in a stray \r.
 .env.example text eol=lf
 
+# Container build, read by a Linux daemon.
+#
+# .dockerignore is the one that actually bites: a pattern carrying a trailing
+# \r may not match what it names, and the pattern this file exists to enforce
+# is ".env" - so a CRLF checkout could quietly put the secrets into the build
+# context. Dockerfile is listed alongside it for consistency and because
+# line-continuation handling has been version-dependent.
+Dockerfile     text eol=lf
+.dockerignore  text eol=lf
+
+# Mounted into the ElasticMQ container. Harmless as CRLF today, since HOCON
+# does not care, but it is the only config in the repo that disagrees with
+# every other one.
+*.conf text eol=lf
+
 # Docs
 *.md   text eol=lf
 *.txt  text eol=lf
