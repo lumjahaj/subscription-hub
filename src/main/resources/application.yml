@@ -1,16 +1,40 @@
 spring:
   application:
     name: subscription-hub
+  # Graceful shutdown needs a bound on how long in-flight work may take.
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   datasource:
-    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB}
+    # A managed database hands you one complete URL, so the whole thing is
+    # overridable rather than only the database name.
+    #
+    # If that managed database offers a pooled endpoint, DO NOT USE IT.
+    # TenantAwareDataSource binds app.tenant_id as a session-level setting on
+    # every connection borrow (SET LOCAL cannot work: Spring borrows the
+    # connection before it issues BEGIN). A transaction-mode pooler - which is
+    # what Neon's and Supabase's pooled endpoints are - hands a different
+    # backend to each transaction, so the setting lands on one and the query
+    # runs on another. Every row-level security policy then reads an unbound
+    # app.tenant_id and returns nothing. Not an error: silent, intermittent,
+    # empty results on financial data.
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/${POSTGRES_DB}}
     # Not POSTGRES_USER. That role is a superuser and owns every table, and
     # Postgres exempts both from row-level security - so the policies would be
     # in place and protect nothing. This role is neither, and is NOBYPASSRLS.
     # Its name is fixed because db/migration grants and policies name it; only
     # the password is configurable. Created by
-    # docker/postgres/init/01-app-role.sh.
+    # docker/postgres/init/01-app-role.sh - which is the Postgres image's
+    # init-script convention, so a managed database has no equivalent and
+    # needs the same SQL run by hand before first boot, or V20's grants fail
+    # at startup.
     username: subscription_hub_app
     password: ${POSTGRES_APP_PASSWORD}
+    hikari:
+      # Hikari's own defaults, made overridable. minimum-idle is the one that
+      # matters on a database that bills for uptime or scales to zero: held
+      # idle connections keep it awake indefinitely.
+      maximum-pool-size: ${DB_POOL_MAX:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:10}
   jpa:
     # Off, so a request holds a Hibernate session - and, under the
     # DELAYED_ACQUISITION_AND_HOLD mode Spring configures, its JDBC connection -
@@ -60,15 +84,23 @@ spring:
   mail:
     host: ${MAIL_HOST:localhost}
     port: ${MAIL_PORT:1025}
+    # Empty locally: Mailpit accepts unauthenticated plain SMTP on 1025. A real
+    # relay needs all four of these together - credentials, auth on, STARTTLS
+    # on, port 587. This block used to claim a real SES integration was "a
+    # config change, not a code one" while hardcoding both booleans and
+    # plumbing no credentials at all, which made the claim false. It is true
+    # now.
+    #
+    # SES's SMTP username and password are generated in the SES console and are
+    # NOT an IAM access key and secret.
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
     properties:
       mail:
         smtp:
-          # Mailpit and SES's SMTP interface both accept plain SMTP on these
-          # ports in this setup; a real SES integration would enable
-          # STARTTLS and move to port 587 - a config change, not a code one.
-          auth: false
+          auth: ${MAIL_AUTH:false}
           starttls:
-            enable: false
+            enable: ${MAIL_STARTTLS:false}
   cloud:
     aws:
       region:
@@ -77,13 +109,34 @@ spring:
         # Static and empty-safe by default: ElasticMQ ignores credentials
         # entirely, so a clean clone needs none to run the queue locally.
         # Real SQS needs real ones, supplied the same way as everywhere else.
+        #
+        # Beware: these are always injected, so the "test" default would
+        # override an EC2 instance role, or anything else the SDK's credential
+        # chain would otherwise find. Blank them explicitly to use the chain.
         access-key: ${AWS_ACCESS_KEY_ID:test}
         secret-key: ${AWS_SECRET_ACCESS_KEY:test}
       sqs:
+        # Empty means the real regional SQS endpoint.
         endpoint: ${SQS_ENDPOINT:http://localhost:9324}
 
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
+  # Behind a TLS-terminating proxy (a Cloudflare Tunnel, a load balancer) the
+  # application only ever sees plain HTTP. Without this, the Location header
+  # UriComponentsBuilder puts on every 201 comes back as http:// on an https://
+  # site, and a client that follows it goes nowhere.
+  forward-headers-strategy: framework
+  # Finish in-flight work on SIGTERM rather than cutting it. A scheduled job
+  # mid-run is the case that matters: BillingCycleJob killed between invoicing
+  # and renewing leaves the subscription due - recoverable, but there is no
+  # reason to cause it on every deploy.
+  shutdown: graceful
+
+openapi:
+  # Where Swagger UI sends "Try it out" requests. A deployed instance must
+  # override this, or the UI fires every request at whatever happens to be
+  # listening on the reader's own machine.
+  server-url: ${OPENAPI_SERVER_URL:http://localhost:8080}
 
 auth:
   jwt:
@@ -102,23 +155,34 @@ platform:
 
 billing:
   cycle:
-    cron: "0 0 * * * *"   # hourly, on the hour - invoices then renews each due subscription
+    # hourly, on the hour - invoices then renews each due subscription
+    cron: "${BILLING_CYCLE_CRON:0 0 * * * *}"
   invoice:
-    due-days: 14
+    due-days: ${BILLING_INVOICE_DUE_DAYS:14}
   pdf:
-    bucket: invoices
-    endpoint: http://localhost:9000
-    access-key: ${MINIO_ROOT_USER}
-    secret-key: ${MINIO_ROOT_PASSWORD}
+    bucket: ${STORAGE_BUCKET:invoices}
+    # Empty resolves the real endpoint for the region, i.e. AWS S3 proper.
+    # MinIO, R2 and Backblaze each need their own value here.
+    endpoint: ${STORAGE_ENDPOINT:http://localhost:9000}
+    # MinIO ignores the region but the SDK refuses to build a client without
+    # one; R2 requires the literal "auto"; real S3 wants the bucket's region.
+    region: ${STORAGE_REGION:us-east-1}
+    # MinIO serves path-style (host/bucket/key). Virtual-host style
+    # (bucket.host/key) is the SDK default and needs a DNS entry per bucket.
+    path-style: ${STORAGE_PATH_STYLE:true}
+    # Named for the store rather than the vendor: MinIO's root credentials
+    # locally, an R2 or S3 key pair anywhere else.
+    access-key: ${STORAGE_ACCESS_KEY:${MINIO_ROOT_USER}}
+    secret-key: ${STORAGE_SECRET_KEY:${MINIO_ROOT_PASSWORD}}
 
 payment:
   # fake: in-process, no network or secrets - the default, and what tests use.
   # stripe: the real API, which additionally needs stripe.secret-key below.
-  provider: fake
+  provider: ${PAYMENT_PROVIDER:fake}
   reconciliation:
     # Offset again from billing (:00) and dunning (:15), so the three jobs
     # never overlap on the same invoice.
-    cron: ${PAYMENT_RECONCILIATION_CRON:0 30 * * * *}
+    cron: "${PAYMENT_RECONCILIATION_CRON:0 30 * * * *}"
     # How long a payment may sit PENDING before we go and ask the provider
     # about it. Below this it is simply mid-flight: a webhook is normally
     # seconds away, and reconciling then would race the path that works.
@@ -131,7 +195,7 @@ dunning:
   cycle:
     # Offset from billing.cycle.cron so collection never runs while the
     # billing cycle is mid-invoice for the same subscription.
-    cron: "0 15 * * * *"
+    cron: "${DUNNING_CYCLE_CRON:0 15 * * * *}"
   # Gaps after a failed attempt, lengthening: a card declined an hour ago is
   # unlikely to work now, while the same card next week might. The first
   # attempt happens as soon as the invoice is issued, so these are retries.
@@ -142,12 +206,16 @@ dunning:
   max-attempts: 4
 
 notification:
-  from: billing@subscription-hub.test
-  # How often the relay moves PENDING outbox rows onto the queue.
+  # Must be deliverable on a real relay: the default is a reserved .test TLD
+  # (RFC 2606), which anything but Mailpit rejects at the envelope.
+  from: ${NOTIFICATION_FROM:billing@subscription-hub.test}
+  # How often the relay moves PENDING outbox rows onto the queue. Every tick is
+  # a query per active tenant, so on a database that scales to zero or bills
+  # for uptime, this is what keeps it awake. Raise it there.
   relay:
-    delay: 5000
+    delay: ${NOTIFICATION_RELAY_DELAY:5000}
   sqs:
-    queue: notifications
+    queue: ${NOTIFICATION_SQS_QUEUE:notifications}
 
 stripe:
   # Only read when payment.provider=stripe; StripeConfig then refuses to
@@ -242,3 +310,35 @@ spring:
     # default profile keeps the strict ordering, where an unexpectedly
     # out-of-order migration is a real signal.
     out-of-order: true
+
+---
+# Deployed profile: the application running against managed services instead of
+# docker-compose.
+#
+# Not called "prod". This is a single instance on free tiers, and the name a
+# real production environment would want is left unclaimed. Not "stage" either,
+# which reads as a pipeline step, nor "demo", which collides with the seeded
+# demo tenant - a log line saying profile=demo tenant=demo helps nobody.
+#
+# It carries almost nothing on purpose. Everything that differs between a
+# laptop and a deployed host is an environment variable above, so only the two
+# things that cannot be expressed that way live here.
+spring:
+  config:
+    activate:
+      on-profile: staging
+  flyway:
+    # Schema only. db/seed carries publicly known passwords.
+    locations: classpath:db/migration
+    # Strict, unlike dev: nothing here can legitimately be out of order, so an
+    # out-of-order migration is a real signal rather than an expected state.
+    out-of-order: false
+
+springdoc:
+  # The API's shape, and the existence of every endpoint, is not public
+  # information on a reachable host. Swagger stays on locally, where it is the
+  # primary way the API is explored.
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

@@ -10,6 +10,7 @@ import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springdoc.core.models.GroupedOpenApi;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -19,6 +20,18 @@ import java.util.List;
 public class OpenApiConfig {
 
     private static final String BEARER_SCHEME = "bearerAuth";
+
+    /**
+     * The origin Swagger UI sends "Try it out" requests to. Hardcoded to
+     * localhost until deployment work needed it: on any other host the UI
+     * would keep firing requests at whatever is listening on the reader's own
+     * machine, which fails confusingly rather than obviously.
+     */
+    private final String serverUrl;
+
+    public OpenApiConfig(@Value("${openapi.server-url}") String serverUrl) {
+        this.serverUrl = serverUrl;
+    }
 
     /**
      * Declares bearer auth globally so Swagger UI shows an Authorize button
@@ -44,7 +57,7 @@ public class OpenApiConfig {
                                 tenant header.""")
                         .license(new License().name("MIT"))
                 )
-                .servers(List.of(new Server().url("http://localhost:8080")))
+                .servers(List.of(new Server().url(serverUrl)))
                 .components(new Components().addSecuritySchemes(BEARER_SCHEME,
                         new SecurityScheme()
                                 .type(SecurityScheme.Type.HTTP)
