@@ -1212,6 +1212,90 @@ description: What is built in Subscription Hub, why each decision was made, and 
     `audit_events_total{type="SUBSCRIPTION_PAST_DUE"}`, which is exactly the
     split the counter's contract promises.
 
+- **Scheduled plan changes** (2026-09-23) — V25's `subscription.pending_plan_id`,
+  two endpoints, one new repository method and a guard added to `renewIfCurrent`.
+  The first item taken for being the largest remaining *product* hole rather than
+  a live defect: every other candidate was hardening something already correct,
+  while a billing backend had no answer to "move this customer from Basic to Pro"
+  except cancel and resubscribe, which loses the period, the usage counters and
+  the audit trail.
+  - **The change is scheduled, never immediate, and that is the whole design.**
+    `InvoiceCalculator.baseLine` reads the plan's price when the invoice is
+    generated, so swapping `plan_id` when the request arrives would bill the
+    closed period — every day of which the customer spent on the old plan — at
+    the new price. `BillingCycleJob` already invoices *before* it renews, so
+    deferring the swap to the renewal makes that mis-billing structurally
+    impossible rather than merely unlikely. Nothing else about the period moves:
+    `currentPeriodStart`/`End` and `nextRenewal` are untouched by the request.
+  - **Keeping the period boundaries is what keeps two existing invariants
+    intact.** `usage_counter` is keyed by `(tenant_id, subscription_id,
+    meter_key, period_start)` and `InvoiceService` reads the period straight off
+    the subscription, so an "immediate" change that re-anchored
+    `currentPeriodStart` would orphan the period's accrued usage from its
+    invoice; and `nextRenewal == currentPeriodEnd` is the invariant
+    `BillingCycleJob` relies on to reuse the renewal finder. Neither is in play
+    here, which is most of why this scope was chosen over proration first.
+  - **A column, not a table.** At most one change can be pending (a second
+    request replaces the first), it carries no history of its own — the audit
+    log is the history — and, decisively, it has to be applied by the *same*
+    statement as the renewal. A separate table would make that a second write
+    that could succeed or fail independently.
+  - **`renewIfCurrent` gained the pending plan in both its SET and its WHERE.**
+    The new period's *length* comes from the plan being moved onto
+    (`effectivePlanOf`), so a plan change committing between the renewal's read
+    and its update would otherwise put a yearly subscription in a one-month
+    period. With the guard it is a no-op and the next run decides again. The
+    null branch has to be spelled out (`(:expected is null and s.pendingPlan is
+    null) or s.pendingPlan = :expected`), because `pending_plan_id = NULL` is
+    never true in SQL and a plain equality would make *every* ordinary renewal
+    miss. The two guards compose in both orders: a schedule landing first makes
+    the renewal retry, a renewal landing first moves the change to the period
+    after.
+  - **Scheduling is a state command, so a conditional UPDATE, not `@Version`.**
+    `setPendingPlanIfPending` writes only if the row still holds the pending plan
+    the caller read, so a repeat of the same request is a no-op — no write, no
+    audit event, no bumped `updated_at` — rather than a 409. Asking for the plan
+    the subscription is already on clears the schedule: "stay on this plan" is
+    what a caller means by it. Allowed from every status but `CANCELED`, which
+    will never renew; `PAUSED` and `PAST_DUE` simply hold the schedule until
+    resume or dunning recovery, since `renewalFor` already gates on
+    `TRIALING`/`ACTIVE`.
+  - **Three audit types, and the third is the point.**
+    `SUBSCRIPTION_PLAN_CHANGE_SCHEDULED` and `_CANCELED` are recorded by the
+    request; `SUBSCRIPTION_PLAN_CHANGED` is recorded by the renewal as `SYSTEM`,
+    because applying the change *clears* `pending_plan_id` and after that nothing
+    else in the database says the plan was ever different. Renewals stay
+    unaudited: the exclusion is for what is high volume and fully derivable, and
+    this is neither. No new counter, per the rule that business events come from
+    `audit.events`.
+  - **One real bug this surfaced, in code it had just added.**
+    `findCurrentByTenantIdAndId` — the seam every compare-and-set retry re-reads
+    through — queried first and refreshed second. Once the finder join-fetched
+    `pendingPlan`, that order threw `EntityFilterException` whenever the FK had
+    changed since the transaction's first read, because a query never overwrites
+    an entity the persistence context already holds. Two admins changing one
+    subscription at once would have got a 500 in place of a retry. Refreshing by
+    id first (no fetch graph) fixes it. A scalar change was always silently
+    ignored instead, which is why the old order held until a nullable association
+    existed. Found by a race test, not by reading.
+  - **`pendingPlan` is the second lazy association on a subscription**, so the
+    three request finders' `@EntityGraph` widened to `{"plan", "pendingPlan"}` —
+    the open-in-view rule from roadmap step 4a, applied to a new field.
+    Nullable, so it fetches as a LEFT JOIN and adds no rows.
+    `AssociationReadsIntegrationTest` covers the loaded side.
+  - Verified live as well as in tests, which is where this project's surprises
+    keep coming from: V25 applied **[out of order]** under `dev` as expected; a
+    scheduled change left the period and `nextRenewal` untouched; a repeat
+    request moved neither `updated_at` nor the audit log; with
+    `billing.cycle.cron` shortened to 20 seconds the job invoiced the closed
+    period at **1999** (the old monthly price) and only then moved the row to the
+    annual plan, with a period of a year and `nextRenewal == currentPeriodEnd`;
+    and the scrape showed
+    `audit_events_total{actor="SYSTEM",type="SUBSCRIPTION_PLAN_CHANGED"}` with no
+    reserved label collision. The six-field cron went through
+    `SPRING_APPLICATION_JSON` rather than `-Dspring-boot.run.arguments`, which
+    Maven splits on spaces.
+
 - **Architecture tests** — `architecture/ArchitectureTest` (ArchUnit,
   `com.tngtech.archunit:archunit-junit5`) turns CLAUDE.md §3/§5's layering and naming
   rules into executable checks: no `..domain..`/`..api..` dependency on
@@ -1260,6 +1344,7 @@ POST GET      /api/customers
 GET PUT        /api/customers/{id}          (PUT needs If-Match with the ETag from a read)
 POST GET      /api/subscriptions[?customerId=]
 GET            /api/subscriptions/{id}
+POST DELETE   /api/subscriptions/{id}/change-plan
 POST GET      /api/subscriptions/{subscriptionId}/usage
 POST GET      /api/subscriptions/{subscriptionId}/invoices
 GET            /api/invoices[?subscriptionId=]
@@ -1401,9 +1486,21 @@ feature module does.
   Customer updates. Product and Plan remain create-only on purpose until plan
   price changes have a versioning answer (a price edit would reprice unbilled
   periods). Subscription changes go through state commands
-  (cancel/pause/resume), not a general update. Delete is absent everywhere,
+  (cancel/pause/resume/change-plan), not a general update. Delete is absent everywhere,
   because every tenant table cascades and invoices, payments and audit events
   hang off these rows.
+- **A plan change takes effect at the period boundary; there is no immediate,
+  prorated one.** That is the deliberate follow-up rather than an oversight, and
+  it is structurally constrained here: `uk_invoice_tenant_sub_period` allows one
+  invoice per subscription per period, so an immediate proration *invoice* is
+  impossible without a schema change — the credit and charge would have to ride
+  the next invoice as new `InvoiceLineKind.PRORATION` lines.
+  `invoice_line.amount_cents` is a plain `bigint` with no CHECK, so negative
+  lines are already storable, but a downgrade credit larger than the base charge
+  needs a credit-balance answer, which is its own piece of work. Nothing warns a
+  customer their scheduled change has not happened yet either: there is no
+  notification for it, which would need a `notification_type_check` widening and
+  a sixth template.
 - No idempotency on create endpoints. Worth at least being able to discuss.
 
 **Smaller**

@@ -391,9 +391,12 @@ contract. Nested per-parent collections (`/api/plans/{planCode}/entitlements`,
   conflict.
 - **Subscriptions change only through compare-and-set.** Every subscription change
   is a state command (cancel, pause, resume, past due, recover, renew), and it goes
-  through `SubscriptionRepository`'s `updateStatusIfStatus`, `cancelIfStatus` or
-  `renewIfCurrent`: one UPDATE that applies only if the row still has the status
-  (and, for renewal, the period) the caller read. On a miss, re-read with
+  through `SubscriptionRepository`'s `updateStatusIfStatus`, `cancelIfStatus`,
+  `setPendingPlanIfPending` or `renewIfCurrent`: one UPDATE that applies only if the
+  row still has the status (and, for renewal, the period and the pending plan) the
+  caller read. A plan change is scheduled the same way, and `renewIfCurrent` applies
+  it — the swap and the new period must be one statement, because the period's length
+  came from the plan being moved onto. On a miss, re-read with
   `findCurrentByTenantIdAndId` and decide again. Never set a field on a loaded
   `SubscriptionEntity` and save it: a dirty managed entity is written at commit
   unconditionally, over whatever committed in between.
@@ -414,6 +417,18 @@ Postgres enum, so `InvoiceLineEntity.kind` deliberately gets plain
 `@Enumerated(EnumType.STRING)` — the NAMED_ENUM combo there would bind a
 nonexistent type and fail at startup. Same category of bug, opposite fix;
 check the column's actual Postgres type before reaching for the combo.
+
+**A fetch-graph finder cannot re-read an association that changed underneath
+it.** A query never overwrites an entity the persistence context already holds,
+so when `findByTenantIdAndId` join-fetches `pendingPlan` and the row's
+`pending_plan_id` changed since this transaction read it, Hibernate assembles a
+row whose fetched association disagrees with the managed instance and throws
+`EntityFilterException` ("is filtered for association") — a 500 where a retry
+belonged. `SubscriptionRepositoryImpl.findCurrentByTenantIdAndId` therefore
+refreshes by id *before* it queries, not after; `find` + `refresh` uses no fetch
+graph and cannot hit it. A scalar change (a status) is silently ignored instead,
+which is why the old order held until a nullable association existed — and why
+the every-compare-and-set retry path is exactly where this shows up.
 
 **Spring Data `save()` on an assigned id merges.** `SimpleJpaRepository.save`
 persists only when the entity looks new, which for a non-generated id means "id
@@ -781,7 +796,9 @@ tenant (id varchar(64) PK — slug)
  ├── product             (unique tenant_id + code)
  │    └── plan           (unique tenant_id + code; interval_unit, interval_count, amount_cents, currency, trial_days)
  │         └── plan_entitlement   (unique tenant_id + plan_id + key; value_json jsonb)
- ├── subscription        (customer_id, plan_id, status, period/renewal/cancel timestamps)
+ ├── subscription        (customer_id, plan_id, status, period/renewal/cancel timestamps;
+ │                       pending_plan_id nullable, V25 — a plan change scheduled for the next
+ │                       renewal, applied and cleared by the renewal's own conditional UPDATE)
  │    ├── subscription_entitlement_override
  │    └── usage_counter
  ├── invoice → invoice_line   (unique tenant_id + subscription_id + period_start; period_start/end added in V6;
@@ -875,6 +892,14 @@ item the state skill named as outstanding. It was worth doing for `app_user` and
 `audit_event` specifically: every other tenant-owned table already had `@TenantId`
 as a backstop, while those two had nothing but a naming convention. See §4.
 Deployment (managed free tiers) remains parked and undecided.
+
+**Scheduled plan changes followed (2026-09-23)**, the first item taken for being
+the largest remaining *product* hole rather than a live defect: a billing backend
+had no answer to "move this customer from Basic to Pro" but cancel and resubscribe.
+A change is scheduled, never immediate — `pending_plan_id` (V25) is applied by the
+renewal's own conditional UPDATE, so the closed period stays billed at the price
+the customer was actually on. Proration is the deliberate follow-up; see the
+subscription-hub-state skill.
 
 - **Two roles, not `FORCE ROW LEVEL SECURITY`.** Keeping Flyway on the owner is
   what lets a cross-tenant backfill still work; FORCE would have made V3's
