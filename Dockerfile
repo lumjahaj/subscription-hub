@@ -12,6 +12,26 @@
 #
 # To update: pull the tag, read `docker image inspect <tag> --format
 # '{{index .RepoDigests 0}}'`, and paste the new digest here deliberately.
+#
+# Why a Dockerfile rather than Jib or buildpacks, since both would remove this
+# file entirely:
+#
+#  - Jib needs no Docker daemon, layers dependencies separately from classes
+#    so a code-only change pushes kilobytes instead of a whole fat jar, and
+#    pushes straight to a registry. For frequent deploys to ECR that is the
+#    better tool, and the honest reason it was not chosen is that this
+#    Dockerfile was already verified end to end - fonts, memory ceiling,
+#    non-root, graceful shutdown - and swapping build systems mid-deployment
+#    would mean re-proving all of it to gain faster incremental pushes on
+#    something deployed occasionally. The font requirement below was
+#    originally cited as a reason against Jib; that turned out to be wrong,
+#    since the base image already carries them.
+#  - `spring-boot:build-image` needs no new dependency at all, and Paketo's
+#    memory calculator is better than the MaxRAMPercentage guess further down,
+#    because it accounts for thread and class count rather than total RAM
+#    alone. It costs a larger image and a slower build.
+#
+# Neither is ruled out. If deploys become frequent, Jib is the one to revisit.
 
 # ---------- build ----------
 FROM maven:3.9-eclipse-temurin-21@sha256:c2a2c58516d160f43b50f12baa427ca86989e0bc942609e04aff61da5d9a7d74 AS build
@@ -32,16 +52,19 @@ RUN mvn -B -q -DskipTests package
 
 # ---------- runtime ----------
 # Ubuntu 22.04, OpenJDK 21.0.12 LTS.
+#
+# This base is chosen partly for its fonts. openhtmltopdf rasterises the
+# invoice PDF through java.awt, which needs fontconfig and at least one real
+# font family; without them the failure is not a missing-class error but a PDF
+# with wrong metrics or no text. This image already ships fontconfig and
+# DejaVu - `fc-list` returns 6 - so nothing needs installing, and the
+# `sans-serif` the template asks for resolves to DejaVu Sans.
+#
+# An earlier version of this file apt-got fontconfig and fonts-dejavu-core on
+# top. It was verifiably a no-op: identical font count with and without. Check
+# `fc-list` before adding it back if the base image is ever changed to one
+# that does not carry them - a slim or distroless base generally will not.
 FROM eclipse-temurin:21-jre-jammy@sha256:61d6c7b34d36aee3f45d043101259f97f3c6d428dc2a6f75513789983c5e254f AS runtime
-
-# openhtmltopdf rasterises the invoice PDF through java.awt, which needs
-# fontconfig and at least one real font family present. A bare JRE image has
-# neither, and the failure is not a missing-class error - it is a PDF that
-# renders with the wrong metrics or no text at all. DejaVu covers the
-# sans-serif the template asks for.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/*
 
 # Not root. Nothing here needs it, and the container has AWS credentials from
 # an instance role in its environment.
