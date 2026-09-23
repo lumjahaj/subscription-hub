@@ -725,6 +725,73 @@ conflict/not-found, role denials, and tenant-isolation checks live in
 
 ---
 
+## Configuration
+
+Every setting has a working local default, so a clean clone needs nothing but
+`cp .env.example .env`. Everything that differs between a laptop and a deployed
+host is an environment variable: there is no second config file to keep in
+step, and pointing the application at a different vendor is not a code change.
+
+**Profiles.** There are two, and neither is the default.
+
+| Profile | What it changes |
+|---|---|
+| *(none)* | Schema migrations only, strict ordering, Swagger served |
+| `dev` | Adds `db/seed` to the Flyway path — seeded tenants, logins and platform admin — and allows out-of-order migrations |
+| `staging` | Schema only, strict ordering, Swagger and `/v3/api-docs` disabled |
+
+`staging` rather than `prod` on purpose: it names what actually exists rather
+than claiming more, and leaves the production name unclaimed.
+
+### Required
+
+No defaults; the application refuses to start without these.
+
+| Variable | Purpose |
+|---|---|
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | The owner credentials Flyway migrates as |
+| `POSTGRES_APP_PASSWORD` | Password for `subscription_hub_app`, the role the application itself connects as |
+| `JWT_SECRET` | HS256 signing key, at least 32 bytes — checked at startup, not at first login |
+| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Object-store credentials, unless `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY` are given instead |
+
+### Overridable
+
+All defaulted, and all listed with their values in
+[`.env.example`](.env.example).
+
+| Group | Variables |
+|---|---|
+| Database | `DB_URL`, `DB_POOL_MAX`, `DB_POOL_MIN_IDLE` |
+| Object store | `STORAGE_ENDPOINT`, `STORAGE_BUCKET`, `STORAGE_REGION`, `STORAGE_PATH_STYLE`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY` |
+| SMTP | `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_AUTH`, `MAIL_STARTTLS`, `NOTIFICATION_FROM` |
+| Queue | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SQS_ENDPOINT`, `NOTIFICATION_SQS_QUEUE` |
+| Payments | `PAYMENT_PROVIDER`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_API_BASE` |
+| Schedules | `BILLING_CYCLE_CRON`, `DUNNING_CYCLE_CRON`, `PAYMENT_RECONCILIATION_CRON`, `NOTIFICATION_RELAY_DELAY`, `BILLING_INVOICE_DUE_DAYS` |
+| Server | `SERVER_PORT`, `OPENAPI_SERVER_URL` |
+| Metrics | `METRICS_SCRAPE_USERNAME`, `METRICS_SCRAPE_PASSWORD` |
+| Bootstrap | `PLATFORM_ADMIN_EMAIL`, `PLATFORM_ADMIN_PASSWORD` |
+
+### Three that bite
+
+- **Never point `DB_URL` at a pooled endpoint.** `TenantAwareDataSource` binds
+  the current tenant as a *session-level* Postgres setting on every connection
+  borrow, because `SET LOCAL` is discarded there — Spring borrows the
+  connection before it issues `BEGIN`. A transaction-mode pooler, which is what
+  Neon's and Supabase's pooled endpoints are, hands a different backend to each
+  transaction: the setting lands on one and the query runs on another, so every
+  row-level security policy reads an unbound tenant and returns nothing. It
+  does not fail — it returns empty results, intermittently, on financial data.
+  Use the direct endpoint.
+- **The application role is not created by a migration.**
+  `docker/postgres/init/01-app-role.sh` runs through the Postgres image's
+  init-script convention, which a managed database does not have. Run the same
+  SQL by hand before first boot, or V20's grants fail at startup.
+- **The AWS credentials are always injected**, so their placeholder defaults
+  would override an EC2 instance role or anything else the SDK's credential
+  chain would otherwise find. Blank them explicitly to use the chain.
+
+---
+
 ## Running tests
 
 ```bash
