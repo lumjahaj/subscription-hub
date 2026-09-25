@@ -94,6 +94,9 @@ usage/           metered usage counters
 billing/         Invoice, invoice lines, PDF rendering and storage
 payment/         provider port, fake + Stripe adapters, webhook settlement
 dunning/         automatic collection, retry schedule, PAST_DUE lifecycle
+notification/    transactional outbox, SQS relay and listener, email
+platform/        platform-admin tenant provisioning
+audit/           who changed what, written in the change's transaction
 ```
 
 Each feature module follows `api → app → domain ← infra`:
@@ -103,15 +106,122 @@ Each feature module follows `api → app → domain ← infra`:
 - **`domain`** — domain models and repository interfaces (ports)
 - **`infra/jpa`** — JPA entities and Spring Data repositories (adapters)
 
-`billing` additionally has `infra/pdf` and `infra/storage`, and `payment` has
-`infra/gateway`: each outside system (database, rendering library, object store,
-payment provider) sits behind its own port rather than in one catch-all adapter
-package.
+`billing` additionally has `infra/pdf` and `infra/storage`, `payment` has
+`infra/gateway`, and `notification` has `infra/sqs`, `infra/mail` and
+`infra/template`: each outside system (database, rendering library, object store,
+payment provider, queue, SMTP) sits behind its own port rather than in one
+catch-all adapter package.
 
 Repositories follow a fixed trio pattern: a domain-layer `XxxRepository`
 interface (the port the app layer depends on), an infra-layer
 `XxxRepositoryImpl` adapter, and a Spring Data `XxxJpaRepository`. This keeps
 Spring Data's query-naming machinery out of the domain contract.
+
+### System overview
+
+One Spring Boot application. Requests enter through the security chain, while
+the scheduled jobs call the same application services directly, with no HTTP
+and no JWT. Each outside system is labelled *local stand-in / deployed service*.
+
+```mermaid
+flowchart LR
+    tenantUser["Tenant user<br/>JWT with tenant_id"]
+    platformAdmin["Platform admin<br/>JWT with PLATFORM_ADMIN, no tenant"]
+    prom["Prometheus + Grafana"]
+
+    subgraph app["Subscription Hub - one Spring Boot application"]
+        security["Security filter chain<br/>JWT validation + TenantResolverFilter"]
+        actuator["/actuator/prometheus<br/>HTTP Basic scrape account"]
+        subgraph jobs["Scheduled jobs - once per active tenant"]
+            bcj["BillingCycleJob"]
+            dj["DunningJob"]
+            nrj["NotificationRelayJob"]
+            prj["PaymentReconciliationJob"]
+        end
+        subgraph modules["Feature modules: api → app → domain ← infra"]
+            identity["auth · tenancy · platform"]
+            commerce["catalog · customer<br/>subscription · usage"]
+            money["billing · payment · dunning"]
+            notif["notification<br/>outbox relay + SqsNotificationListener"]
+            auditMod["audit · common"]
+        end
+    end
+
+    pg[("PostgreSQL with row-level security<br/>Postgres 17 / Neon direct endpoint")]
+    store[("Object store<br/>s3mock / S3")]
+    provider["Payment provider<br/>fake, in-process / Stripe"]
+    stripeHook["Stripe webhook<br/>authenticated by signature"]
+    queue[["Queue<br/>ElasticMQ / SQS"]]
+    smtp["SMTP<br/>Mailpit / SES"]
+
+    tenantUser --> security
+    platformAdmin --> security
+    prom -->|"scrape"| actuator
+    security --> modules
+    jobs -->|"call app services directly"| modules
+    modules -->|"JDBC as subscription_hub_app"| pg
+    money -->|"invoice PDFs"| store
+    money -->|"create payment, reconcile"| provider
+    provider -.->|"Stripe only"| stripeHook
+    stripeHook -->|"POST /api/webhooks/stripe"| money
+    notif -->|"publish outbox rows"| queue
+    queue -->|"consume"| notif
+    notif -->|"email + PDF"| smtp
+```
+
+### One billing cycle
+
+One subscription through one cycle, with Stripe as the provider. Every step
+that touches the database is its own short transaction, and no remote call
+runs inside one. The relay and `DunningJob` run on their own schedules, so
+their order relative to each other is not fixed; with the fake provider,
+settlement happens inside the create call instead of arriving by webhook.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BCJ as BillingCycleJob
+    participant PDF as InvoicePdfService
+    participant DB as Postgres
+    participant OS as Object store
+    participant REL as NotificationRelayJob
+    participant Q as SQS
+    participant LIS as SqsNotificationListener
+    participant MAIL as SMTP
+    participant DJ as DunningJob
+    participant PAY as PaymentService
+    participant STR as Stripe
+    participant SET as PaymentSettlementService
+
+    BCJ->>DB: InvoiceService.generateForCurrentPeriod
+    Note over BCJ,DB: One transaction: invoice, lines, audit event and outbox row. The outbox row commits with the invoice.
+    BCJ->>PDF: generatePdf(invoiceId)
+    PDF->>DB: load and render (read-only transaction)
+    PDF->>OS: upload PDF (no transaction open)
+    PDF->>DB: attachPdfObjectKeyIfAbsent (conditional UPDATE)
+    Note over PDF,OS: No remote call inside a transaction. A PDF failure is logged and never blocks renewal.
+    BCJ->>DB: SubscriptionRenewalService: renewIfCurrent (conditional UPDATE)
+    Note over BCJ,DB: Invoice before renew: renewal overwrites the period start, so a period renewed first could never be billed.
+
+    REL->>DB: claimPending (read-only transaction)
+    REL->>Q: publish NotificationMessage (no transaction open)
+    REL->>DB: markPublished
+    Q->>LIS: deliver message
+    LIS->>DB: NotificationDeliveryService: load row, no-op if already SENT
+    LIS->>OS: download invoice PDF
+    LIS->>MAIL: send HTML + text email with PDF attached
+    LIS->>DB: markSent
+    Note over Q,MAIL: A failed send is rethrown, so SQS redelivers and eventually dead-letters.
+
+    DJ->>DB: DunningService.startAttempt: count and commit the attempt
+    DJ->>PAY: pay(invoice, stored method, key dunning:invoiceId:n)
+    PAY->>DB: reserve PENDING payment (transaction)
+    PAY->>STR: create and confirm PaymentIntent (no transaction open)
+    PAY->>DB: record provider reference (transaction)
+    STR-)SET: webhook, signature verified by PaymentWebhookService
+    SET->>DB: payment SUCCEEDED, invoice PAID, audit, DunningService (one transaction)
+    Note over SET,DB: Idempotent by state: only a PENDING payment settles, so a duplicate or late event changes nothing.
+```
 
 ### Data model
 
