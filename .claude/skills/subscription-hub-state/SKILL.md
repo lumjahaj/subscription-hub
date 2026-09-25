@@ -433,7 +433,7 @@ description: What is built in Subscription Hub, why each decision was made, and 
     (`maxReceiveCount = 5`) moves it to `notifications-dlq` after repeated
     failure. **ElasticMQ stands in for real SQS** locally and in tests —
     same "code against the standard, keep the vendor a config value" shape
-    as MinIO/S3 and fake/Stripe; only `spring.cloud.aws.sqs.endpoint`
+    as s3mock/S3 and fake/Stripe; only `spring.cloud.aws.sqs.endpoint`
     changes for production. SNS was deliberately left out: fan-out needs at
     least two subscribers, and today there is exactly one (email); it
     becomes the right addition once outbound tenant webhooks give it a
@@ -1322,6 +1322,63 @@ description: What is built in Subscription Hub, why each decision was made, and 
   `Location` header get flagged where others that only forward the entity to
   a mapper don't; the rule undercounts that coupling, never overcounts it.
 
+- **Deployed to managed services** (2026-09-23 to 2026-09-25) — S3, SQS, SES and
+  Neon, the application containerised on EC2 behind a Cloudflare quick tunnel.
+  Five of six planned stages shipped; Grafana Cloud is the sixth and is not done.
+  Standing rules are in CLAUDE.md §9; what follows is what was *learned*, which is
+  the part worth keeping.
+  - **The headline result is that "the vendor is a config value" only partly
+    held**, and the pattern in where it failed is the interesting bit:
+
+    | Vendor | Held? |
+    |---|---|
+    | S3 | **No** — three code changes |
+    | SQS | **Partly** — no adapter change, but the endpoint default had to be inverted |
+    | SES | **Yes** — nothing at all |
+    | Neon | **Yes** — nothing at all |
+
+    It held wherever the integration was plain SMTP or plain JDBC, and leaked
+    wherever an AWS SDK client had to be constructed. The three S3 defects were a
+    credential provider pinned to static credentials (so no IAM role could ever be
+    used), unconditional bucket creation, and a create request with no location
+    constraint — which could only ever have succeeded in `us-east-1`, and was
+    invisible because MinIO ignores the field entirely.
+  - **"Unset is the deployed value"** is a new configuration rule (CLAUDE.md §5),
+    and it exists because the obvious alternative is not expressible on Windows:
+    PowerShell's `.env` loader *deletes* a variable given an empty value, so
+    "set but empty" collapses to "absent" and the localhost default wins. That
+    shipped an S3 client addressing `<bucket>.localhost`, which surfaced only as a
+    notification stuck at `PUBLISHED` and dead-lettered five redeliveries later.
+  - **Neon's pooled endpoint silently breaks tenant isolation**, and the way it was
+    caught matters more than the fact. A single request through the pooler looked
+    perfectly correct. Under 40 concurrent reads, the owning tenant saw its own
+    data **0 times in 19 of 20 requests**, while the direct endpoint was 20/20. The
+    session-level `app.tenant_id` binding does not follow a transaction to whichever
+    backend a transaction-mode pooler assigns. Note the shape: data **disappears**
+    rather than leaks, so nothing alarms.
+  - **A managed provider's console-created roles may carry `BYPASSRLS`.** Neon's own
+    owner role does. Had `subscription_hub_app` been created through the UI rather
+    than by SQL, it would very likely have inherited the same exemption and left
+    every policy enforcing nothing, with a green suite — the exact premise that made
+    RLS worth doing. The check is `rolbypassrls` on the role *and every role it
+    inherits*.
+  - **Verified live, not merely deployed**: cross-tenant reads 404 through the public
+    URL under concurrency; `allocateNextNumber` (a native query, the case `@TenantId`
+    cannot cover) produced `INV-000001` for a second tenant; V21's SECURITY DEFINER
+    gauges return real numbers; an invoice ran end to end through Neon → S3 → SQS →
+    SES; and the `staging` profile's Swagger lockdown returns 404, which had never
+    been exercised.
+  - **Two things only a real run could show.** Graceful shutdown, added when
+    open-in-view was turned off and never once exercised, works. And the SES
+    sandbox pins `NOTIFICATION_FROM` to exactly the verified address while DMARC
+    fails for a Gmail sender, so mail lands in spam — a property of having no
+    domain, not a defect.
+  - **Cost is now a design constraint.** The AWS account is past its free tier, so
+    EC2 bills from the first hour. The operating rule is to terminate after each
+    session and rebuild from ECR plus `deploy/ec2-user-data.sh` — a script rather
+    than an AMI, because an AMI is backed by an EBS snapshot that bills while it
+    exists.
+
 **Endpoints:**
 ```
 POST          /api/auth/token          (public)
@@ -1551,7 +1608,8 @@ feature module does.
   renders identically everywhere and passes PDF/A.
 - The renderer and the storage adapter are both exercised against real
   dependencies, but there is **no test for the storage failure path** — e.g.
-  that `BillingCycleJob` really does continue when MinIO is unreachable. That
+  that `BillingCycleJob` really does continue when the object store is
+  unreachable. That
   behaviour is asserted only by reading the code.
 
 **Payments**
@@ -1842,6 +1900,22 @@ feature module does.
   otherwise is the tenant's call per customer, but that needs a `VOID` invoice
   transition, which is still unreachable.
 - ~~Provisioning is not audited~~ — closed by Audit events.
-- **Swagger UI and `/v3/api-docs` are public.** Convenient locally, and it exposes
-  the full API shape to anyone who can reach the service. Fine for a portfolio, not
-  for a real deployment.
+- ~~**Swagger UI and `/v3/api-docs` are public.**~~ — closed for a deployed host by
+  the `staging` profile, which disables both; verified returning 404 through the
+  public URL. They stay on locally, where Swagger is the primary way the API is
+  explored, and that asymmetry is the point: the exposure only ever mattered on a
+  reachable host.
+
+- **The deployed instance has no rate limiting in front of it.** `/api/auth/token`
+  does a bcrypt verification per call and has none of its own. The plan was a
+  Cloudflare WAF rule, which needs a named tunnel, which needs a domain — and
+  there is none, so the deployment uses a quick tunnel whose only protection is
+  that its hostname is random, unindexed and changes on every restart. That is
+  obscurity rather than a control, and it is the reason the instance is not left
+  running unattended. A domain would close this and SES's DKIM alignment together.
+
+- **Nothing runs long enough to have trends.** The operating rule is to terminate
+  the instance after each session, which makes Grafana Cloud — the one unshipped
+  deployment stage — largely pointless: `jobs.last.success`, the outbox age gauge
+  and the dunning counters only say anything over time. Metrics remain a local
+  Compose concern until something runs continuously.

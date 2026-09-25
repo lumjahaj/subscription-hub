@@ -38,14 +38,28 @@ Read these before suggesting anything.
 
 Java 21 · Spring Boot 3.5.6 · Maven · Spring Web / Data JPA / Validation /
 Security · Hibernate 6 · PostgreSQL 17 · Flyway · Testcontainers · Docker Compose ·
-springdoc-openapi 2.8.x · MinIO (invoice PDFs) · AWS SDK v2 for S3 ·
+springdoc-openapi 2.8.x · s3mock (invoice PDFs) · AWS SDK v2 for S3 ·
 openhtmltopdf + Thymeleaf · stripe-java (payments) · Spring Cloud AWS SQS +
 ElasticMQ (notifications) · spring-boot-starter-mail + Mailpit (email) ·
 Micrometer + Prometheus + Grafana (observability)
 
-The object store is reached with the **AWS SDK, not the MinIO client** — MinIO is
-S3-compatible, so the vendor stays a config value and the same adapter works
-against real S3/R2 by changing an endpoint.
+The object store is reached with the **AWS SDK, not a vendor client** — the local
+stand-in is S3-compatible, so the same adapter works against real S3 by changing
+an endpoint.
+
+**That claim has now been tested, and it only partly held.** A staged deployment
+(§9) ran the application against real S3, SQS, SES and Neon. SES and Neon needed
+nothing at all — a `.env` change and no code. SQS needed no adapter change but
+its endpoint default had to be inverted. **S3 needed three code changes**: the
+credential provider was pinned to static credentials so no IAM role could ever
+be used, bucket creation was unconditional, and the create request omitted the
+location constraint, so it could only ever have worked in `us-east-1`. The
+pattern is worth remembering: the claim held wherever the integration was plain
+SMTP or plain JDBC, and leaked wherever an AWS SDK client had to be constructed.
+
+**s3mock, not MinIO**, and the reason is operational rather than technical: MinIO
+withdrew its community images from Docker Hub, then from quay.io, breaking CI
+twice — see the pinned-image rule in §5.
 
 Thymeleaf is present as a **library only** (`org.thymeleaf:thymeleaf`), never
 `spring-boot-starter-thymeleaf`: it renders the invoice HTML that openhtmltopdf
@@ -75,7 +89,8 @@ Authentication is **self-issued HS256 JWTs**, validated by
 unused since the beginning). Symmetric signing because issuer and validator are the
 same process; an external IdP would use RSA + JWKS and change only `issuer-uri`,
 since the verification side is already the standard machinery — the same
-"code against the standard, keep the provider a config value" shape as MinIO/S3.
+"code against the standard, keep the provider a config value" shape as the
+object store.
 
 Planned: Redis, WireMock.
 
@@ -453,10 +468,10 @@ three commits:
   `./mvnw -B verify | grep -c "Container is started (JDBC URL"` must print `1`.
   It printed `3` for three commits and nobody looked.
   That grep matches a **JDBC-specific** log line, so it counts Postgres
-  containers only. `AbstractIntegrationTest` also starts a MinIO container for
-  invoice PDFs, which never emits that line — two containers per build is
+  containers only. `AbstractIntegrationTest` also starts s3mock, Mailpit and
+  ElasticMQ, none of which emit that line — four containers per build is
   expected, and the check still means "one Postgres". Don't "fix" the grep to
-  match both and then panic at `2`.
+  match them all and then panic at `4`.
 - Property overrides (`@TestPropertySource`, `@DynamicPropertySource`) go on
   `AbstractIntegrationTest`, **never** a subclass — each distinct set of
   properties is a separate Spring context-cache key, so a subclass-level
@@ -470,12 +485,27 @@ three commits:
 - **Pin every container image, and treat "works locally" as no evidence.** A
   developer machine runs from its local image cache, so an image that has been
   retagged, moved or deleted upstream keeps working locally and fails only on CI,
-  which always pulls. That is exactly what happened: MinIO's `minio/minio`
-  repository disappeared from Docker Hub, CI died with "repository does not
-  exist", and every local build stayed green. Images now come from
-  `quay.io/minio/minio` with a pinned `RELEASE.*` tag, and `stripe-mock` is
-  pinned too; `:latest` anywhere is the same bug waiting. `docker-compose.yml`
-  needs the same treatment as the test containers — a fresh clone pulls both.
+  which always pulls. `:latest` anywhere is the same bug waiting, and
+  `docker-compose.yml` needs the same treatment as the test containers — a fresh
+  clone pulls both.
+
+  **This has now happened twice, to the same dependency.** MinIO's
+  `minio/minio` repository disappeared from Docker Hub; CI died with "repository
+  does not exist" while every local build stayed green. The fix was
+  `quay.io/minio/minio` with a pinned `RELEASE.*` tag — and that was then deleted
+  too, every tag including `latest`, killing CI again with 233 errors and
+  439 seconds of pull timeouts, and again invisibly on developer machines.
+
+  The second time it was worse than CI: `docker-compose.yml` used the same image,
+  so a fresh clone could not start the local stack at all — breaking the
+  runnable-from-a-clean-clone property §2 calls protected.
+
+  The object store is now **`adobe/s3mock`**. No remaining MinIO source was
+  usable: `bitnamilegacy/minio` is an explicitly frozen archive, and
+  `chainguard/minio` publishes only `:latest` for free, so it cannot be pinned —
+  which conflicts with this very rule. The lesson pinning alone does not cover:
+  **prefer an image whose publisher's product it is.** A pinned tag protects
+  against drift, not withdrawal.
 - Setup helpers assert the response status before calling `.getBody()`.
   Otherwise a problem+json body deserializes into the response record and
   surfaces as a confusing Jackson error (ProblemDetail's numeric `status` vs.
@@ -753,6 +783,28 @@ Full reasoning under Current state in the subscription-hub-state skill.
 - **Missed periods are billed on reactivation, not forgiven.** Waiving them is the
   tenant's decision, and needs `VOID`.
 
+**Configuration: "unset is the deployed value."** Most settings default to what
+local development wants and a deployed host overrides them. Three cannot work
+that way, because what a deployed host needs is for the setting to be *absent* —
+the object-store endpoint, the SQS endpoint and the AWS credentials all mean "ask
+the SDK to work it out" when nothing is set: the real regional endpoint, and the
+default credential chain (`~/.aws/credentials`, or an EC2 instance role).
+
+Those default to unset, and `.env` states the **local** value. The rule for
+anything added later: **if the deployed value is nothing, the default must be
+nothing, and local must be explicit.**
+
+The reason it is a rule and not a preference is that the obvious alternative —
+default to localhost, blank it when deploying — **is not expressible on Windows.**
+The README's PowerShell `.env` loader calls
+`Environment.SetEnvironmentVariable`, which *deletes* a variable given an empty
+value rather than setting it, so "set but empty" collapses back to "absent" and
+the localhost default wins. The bash loader exports an empty string and behaves
+differently. That divergence shipped an S3 client addressing `<bucket>.localhost`
+on the first real deployment attempt, and it surfaced only as a notification stuck
+at `PUBLISHED` — five redeliveries later it dead-lettered. Any config whose
+meaning depends on empty-versus-absent is broken on one of the two platforms.
+
 **Migrations** — Flyway, `src/main/resources/db/migration/`. Never edit an
 applied migration; add a new versioned one.
 
@@ -848,7 +900,7 @@ column carries a `tenant_isolation` policy (V22, V23); the only exceptions are
 ## 7. Roadmap
 
 Subscription state transitions (cancel/pause/resume), renewal processing,
-usage metering, billing/invoice calculation, invoice PDFs (MinIO),
+usage metering, billing/invoice calculation, invoice PDFs (S3-compatible storage),
 JWT authentication + RBAC, payments (fake + Stripe adapters, webhook
 settlement), dunning (automatic collection, retries, `PAST_DUE` →
 `UNCOLLECTIBLE`/`CANCELED`), notifications (transactional outbox → SQS →
@@ -891,7 +943,8 @@ something already correct.
 item the state skill named as outstanding. It was worth doing for `app_user` and
 `audit_event` specifically: every other tenant-owned table already had `@TenantId`
 as a backstop, while those two had nothing but a naming convention. See §4.
-Deployment (managed free tiers) remains parked and undecided.
+**Deployment followed (2026-09-23 to 2026-09-25)** and is no longer parked: five
+of six staged steps shipped and were verified against real AWS and Neon. See §9.
 
 **Scheduled plan changes followed (2026-09-23)**, the first item taken for being
 the largest remaining *product* hole rather than a live defect: a billing backend
@@ -943,3 +996,69 @@ works, how to verify. Ask for the actual stack trace rather than guessing —
 the sanitized problem+json response body hides the real exception.
 
 When multiple approaches are valid, compare briefly and recommend one.
+
+---
+
+## 9. Deployment
+
+Deployed 2026-09-23 to 2026-09-25, one vendor at a time, each verified live
+before the next. Full stage-by-stage detail is in the subscription-hub-state
+skill; this section is the standing rules.
+
+**Managed services, one AWS account plus Neon.** S3 for invoice PDFs, SQS for the
+notification outbox, SES's SMTP interface for email, Neon for Postgres, all in
+`eu-central-1`. The application runs as a container on EC2 behind a Cloudflare
+quick tunnel, pulling its image from ECR via an instance role. `staging` is the
+only deployed profile — deliberately not `prod`, which would overstate one
+free-tier instance and claim a name a real environment would want.
+
+**Credentials come from the SDK chain, never from a file on the box.**
+`StorageConfig` uses static credentials only when an access key is configured and
+falls through to `DefaultCredentialsProvider` otherwise; Spring Cloud AWS does the
+same for SQS once its always-injected defaults are blanked. On a developer machine
+that resolves `~/.aws/credentials`, on EC2 the instance role. This is what the
+"unset is the deployed value" rule in §5 exists to protect — a leftover
+placeholder silently beats an instance profile.
+
+**Never point the datasource at a pooled Postgres endpoint.**
+`TenantAwareDataSource` binds `app.tenant_id` as a *session*-level setting at
+connection borrow, because §4 records that `SET LOCAL` is discarded there. A
+transaction-mode pooler — which is what Neon's and Supabase's pooled endpoints
+are — gives each transaction a different backend, so the setting lands on one and
+the query runs on another, and every RLS policy reads an unbound tenant.
+
+That failure is **silent, concurrency-dependent, and deletes rather than leaks**:
+a single request against the pooler looked perfectly correct, while 40 concurrent
+reads returned the owning tenant's own data **0 times in 19 of 20 requests**. For a
+billing system, invoices that intermittently do not exist is worse than an error.
+Use the direct endpoint.
+
+**The application role must be created by SQL, not a provider console.** Neon
+grants console-created roles membership in `neon_superuser`, and Neon's own owner
+role carries `BYPASSRLS` — so a console-created `subscription_hub_app` would very
+likely inherit an exemption and leave every policy enforcing nothing, with a
+green test suite. Before trusting a managed database, check
+`rolbypassrls` on the app role **and on every role it inherits**; expect `f` and
+zero rows. This is the same premise-check that made RLS worth doing at all (§4).
+
+**The bucket and the queues are infrastructure, not application concerns.**
+`billing.pdf.create-bucket-if-missing` is `false` under `staging`, so the write
+path issues neither `headBucket` nor `createBucket` and the deployed credential
+needs only `s3:GetObject` and `s3:PutObject`. The SQS queues and their redrive
+policy are provisioned before a deploy touches them, exactly as
+`elasticmq.conf` does locally.
+
+**Cost is a design constraint here.** The AWS account is past its twelve-month
+free tier, so EC2 bills from the first hour — roughly $10–13/month running, once
+the public IPv4 charge is counted. `docker compose down` does not stop it; only
+stopping or terminating the instance does. The operating rule is to terminate
+after each session and rebuild from ECR plus `deploy/ec2-user-data.sh`, which is
+why there is a bootstrap script and not an AMI: an AMI is backed by an EBS
+snapshot that bills while it exists.
+
+**Still deliberately absent.** No WAF, because a quick tunnel has none — so
+`/api/auth/token`, which does a bcrypt verification per call and has no rate
+limiting of its own, sits behind nothing but an unindexed URL. That is obscurity,
+not a control, and it is the reason not to leave the instance running unattended.
+A domain would fix it, along with SES's DKIM alignment, and has been declined as
+not worth the cost.
