@@ -20,7 +20,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.MinIOContainer;
+
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
@@ -48,7 +48,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * them JVM-wide lifetime; Ryuk reaps them on exit.
  *
  * The "exactly one container per build" invariant in CLAUDE.md §5 greps for
- * "Container is started (JDBC URL", which is a JDBC-specific log line. MinIO,
+ * "Container is started (JDBC URL", which is a JDBC-specific log line. s3mock,
  * Mailpit and ElasticMQ never emit it, so that check still counts Postgres
  * containers only and still reads 1 — three more non-JDBC containers don't
  * weaken it.
@@ -60,9 +60,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * - billing.cycle.cron is disabled ("-" is Spring's disabled-cron sentinel) so
  *   BillingCycleJob's hourly schedule can't fire mid-test and invoice or renew
  *   a subscription a test is in the middle of asserting against.
- * - billing.pdf.* points at the MinIO container. Without this the S3Client
- *   bean fails to build at all, since application.yml resolves its credentials
- *   from MINIO_ROOT_USER/PASSWORD env vars that don't exist in a test JVM.
+ * - billing.pdf.* points at the s3mock container. The endpoint has to come from
+ *   here because the container's port is only known at run time; the
+ *   credentials because application.yml now defaults them to unset, which
+ *   means "use the AWS credential chain" - correct for a deployed host and
+ *   wrong for a test JVM, which has no chain to fall back on.
  * - notification.relay.delay is stretched to a day: NotificationRelayJob would
  *   otherwise fire on its own schedule mid-test. Notification tests drive
  *   NotificationRelayService directly for deterministic timing, the same
@@ -154,18 +156,37 @@ public abstract class AbstractIntegrationTest {
                     MountableFile.forHostPath("docker/postgres/init/01-app-role.sh", 0755),
                     "/docker-entrypoint-initdb.d/01-app-role.sh");
 
+    // S3-compatible object store for invoice PDFs.
+    //
     // No @ServiceConnection equivalent: Spring Boot has no S3 auto-configuration
     // to feed connection details into (that lives in Spring Cloud AWS), so the
     // endpoint and credentials are wired through @DynamicPropertySource instead.
-    // quay.io, not Docker Hub: MinIO's docker.io/minio/minio repository is
-    // gone (a pull now answers "repository does not exist"), which broke CI
-    // while every developer machine kept passing from its local image cache.
-    // MinIO's own documentation has pointed at quay.io for some time.
-    // asCompatibleSubstituteFor tells Testcontainers this is still MinIO;
-    // MinIOContainer otherwise rejects an image whose name isn't minio/minio.
-    static final MinIOContainer MINIO = new MinIOContainer(
-            DockerImageName.parse("quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z")
-                    .asCompatibleSubstituteFor("minio/minio"));
+    //
+    // s3mock rather than MinIO, and the reason is the pinned-image rule in
+    // CLAUDE.md §5 rather than a technical preference. MinIO removed its
+    // community images from Docker Hub, which broke CI once; the quay.io
+    // replacement was then removed too, taking every tag with it including
+    // latest, and broke CI again - both times invisibly on developer machines,
+    // which pull from a local cache. The remaining MinIO sources are a Bitnami
+    // archive explicitly marked legacy and a Chainguard image that publishes
+    // only :latest for free, which cannot be pinned. Neither is a dependency
+    // worth betting a third outage on.
+    //
+    // s3mock is a purpose-built S3 mock: ~300MB against LocalStack's ~1GB,
+    // which matters because CI pulls fresh on every run. The fidelity
+    // LocalStack would add buys nothing here - this codebase calls exactly
+    // four operations (putObject, getObject, headBucket, createBucket), and
+    // the adapter has now been verified against real AWS S3, which is a
+    // stronger guarantee than any emulator.
+    //
+    // It authenticates nothing, so the credentials below are arbitrary; they
+    // only have to be non-blank, because a blank access key is what selects
+    // the default credential chain (see StorageConfig.credentialsProvider).
+    private static final int S3MOCK_HTTP_PORT = 9090;
+
+    static final GenericContainer<?> S3MOCK =
+            new GenericContainer<>(DockerImageName.parse("adobe/s3mock:3.12.0"))
+                    .withExposedPorts(S3MOCK_HTTP_PORT);
 
     // Local SMTP inbox for notification emails. No Testcontainers module of
     // its own, so a plain GenericContainer with its two ports exposed; its
@@ -185,7 +206,7 @@ public abstract class AbstractIntegrationTest {
 
     static {
         POSTGRES.start();
-        MINIO.start();
+        S3MOCK.start();
         MAILPIT.start();
         ELASTICMQ.start();
     }
@@ -209,9 +230,10 @@ public abstract class AbstractIntegrationTest {
 
     @DynamicPropertySource
     static void storageProperties(DynamicPropertyRegistry registry) {
-        registry.add("billing.pdf.endpoint", MINIO::getS3URL);
-        registry.add("billing.pdf.access-key", MINIO::getUserName);
-        registry.add("billing.pdf.secret-key", MINIO::getPassword);
+        registry.add("billing.pdf.endpoint",
+                () -> "http://" + S3MOCK.getHost() + ":" + S3MOCK.getMappedPort(S3MOCK_HTTP_PORT));
+        registry.add("billing.pdf.access-key", () -> "s3mock-ignores-this");
+        registry.add("billing.pdf.secret-key", () -> "s3mock-ignores-this");
         registry.add("spring.mail.host", MAILPIT::getHost);
         registry.add("spring.mail.port", () -> MAILPIT.getMappedPort(1025));
         registry.add("spring.cloud.aws.sqs.endpoint",

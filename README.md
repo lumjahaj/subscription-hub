@@ -38,8 +38,8 @@ tenants (SaaS customers) from one deployment:
 - **Billing** turns a closed period into an invoice: a `BASE` line for the
   plan's recurring charge plus `USAGE` lines priced from the metered
   counters, with per-tenant human-readable invoice numbers.
-- **Invoice PDFs** are rendered from an HTML template and stored in MinIO
-  (S3-compatible object storage), then streamed back through the API.
+- **Invoice PDFs** are rendered from an HTML template and stored in S3-compatible
+  object storage, then streamed back through the API.
 - **Payments** collect an invoice through a provider port. The default provider
   is an in-process fake — no account, no network — and Stripe is opt-in by
   config. Neither reports the outcome from the API call itself: a payment is
@@ -59,7 +59,7 @@ tenants (SaaS customers) from one deployment:
   an HTML/text email (the invoice PDF attached, when there is one) over
   SMTP. Locally and in tests the queue is ElasticMQ and the inbox is
   Mailpit — both stand in for their real counterparts (SQS, Amazon SES) the
-  same way MinIO stands in for S3.
+  same way s3mock stands in for S3.
 - **Audit log** records who changed what: catalog and customer changes,
   subscription transitions, invoices, payment outcomes, dunning decisions and
   platform tenant lifecycle. Each event is written in the same transaction as
@@ -486,7 +486,7 @@ the client should re-read and retry.
 - PostgreSQL 17, Flyway migrations, Hibernate 6, and Postgres row-level security
   for tenant isolation (the application connects as a restricted, non-owner role
   so the policies actually apply to it)
-- MinIO for object storage, reached with the **AWS SDK v2 for S3** — MinIO is
+- s3mock for object storage, reached with the **AWS SDK v2 for S3** — it is
   S3-compatible, so the same code runs against real S3 or R2 by changing an
   endpoint
 - openhtmltopdf + Thymeleaf (as a library, not the Spring MVC starter) for
@@ -498,13 +498,13 @@ the client should re-read and retry.
   since verification is an HMAC against a shared secret. That is why the Stripe
   path has CI coverage a real-account integration could never have
 - Spring Cloud AWS SQS for the notification queue, backed by **ElasticMQ**
-  locally and in tests — the same "vendor is a config value" shape as MinIO/S3
+  locally and in tests — the same "vendor is a config value" shape as s3mock/S3
 - `spring-boot-starter-mail` for outbound email, backed by **Mailpit** locally
   and in tests as a stand-in for a real SMTP provider (e.g. Amazon SES)
 - Maven
 - springdoc-openapi (Swagger UI)
-- Docker Compose (Postgres + pgAdmin + MinIO + Mailpit + ElasticMQ)
-- Testcontainers — integration tests run against a real Postgres, a real MinIO,
+- Docker Compose (Postgres + pgAdmin + s3mock + Mailpit + ElasticMQ)
+- Testcontainers — integration tests run against a real Postgres, a real s3mock,
   Mailpit, ElasticMQ and Stripe's own `stripe-mock`, not hand-written mocks
 - GitHub Actions CI (`mvn verify`; the tests provision their own containers)
 
@@ -534,8 +534,7 @@ This brings up:
 |----------------|--------------------------|------------------------------------------|
 | Postgres       | `localhost:5432`         | DB/user/password from `.env`. Two roles — see below |
 | pgAdmin        | http://localhost:8081    | Login with `PGADMIN_DEFAULT_EMAIL`/`PASSWORD` from `.env`; add a server with host `postgres` |
-| MinIO (S3 API) | `localhost:9000`         | Used by the app to store invoice PDFs    |
-| MinIO console  | http://localhost:9001    | Login with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` from `.env`; browse stored PDFs under the `invoices` bucket |
+| s3mock (S3 API) | `localhost:9000`        | Used by the app to store invoice PDFs. In-memory, so PDFs do not survive a restart — they are regenerable |
 | Mailpit (SMTP) | `localhost:1025`         | Used by the app to send notification emails — no credentials needed |
 | Mailpit inbox  | http://localhost:8025    | Every email the app sends lands here; nothing leaves the machine |
 | ElasticMQ (SQS)| `localhost:9324`         | Used by the app as the notification queue — no credentials needed |
@@ -753,10 +752,10 @@ No defaults; the application refuses to start without these.
 | `POSTGRES_APP_PASSWORD` | Password for `subscription_hub_app`, the role the application itself connects as |
 | `JWT_SECRET` | HS256 signing key, at least 32 bytes — checked at startup, not at first login |
 
-`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` are required by `docker-compose.yml` for
-the MinIO container, but the application no longer reads them: it takes its
-object-store credentials from `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY`, which
-`.env.example` sets to the same values.
+The application's object-store credentials are `STORAGE_ACCESS_KEY` and
+`STORAGE_SECRET_KEY`, which `.env.example` sets for the local store. s3mock
+authenticates nothing, so locally they only have to be non-blank — blank is what
+selects the AWS credential chain instead.
 
 ### Overridable
 
@@ -795,11 +794,11 @@ All defaulted, and all listed with their values in
   chain would otherwise find. Blank them explicitly to use the chain.
 - **Unset object-store credentials mean the AWS credential chain, not "no
   credentials".** `STORAGE_ACCESS_KEY`/`STORAGE_SECRET_KEY` are set in `.env`
-  for MinIO; delete them on a deployed host and the SDK finds
+  for the local object store; delete them on a deployed host and the SDK finds
   `~/.aws/credentials` or an EC2 instance role instead, so no long-lived key
-  needs to exist on the box. They deliberately do not inherit from
-  `MINIO_ROOT_USER` — see the comment in `application.yml` for why that
-  fallback was removed.
+  needs to exist on the box. They deliberately have no fallback to any other
+  variable — see the comment at the top of `application.yml` for why "unset is
+  the deployed value" is a rule here rather than a convention.
 
 ---
 
@@ -811,7 +810,7 @@ All defaulted, and all listed with their values in
 
 This is also what runs in CI on every push/PR to `main` (see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Integration tests
-provision their own Postgres, MinIO, Mailpit, ElasticMQ and stripe-mock via
+provision their own Postgres, s3mock, Mailpit, ElasticMQ and stripe-mock via
 Testcontainers, so nothing needs to be running first — invoice totals, tenant
 isolation, PDF round trips, concurrent charge attempts, signed webhook
 settlement, the whole dunning lifecycle, and notification delivery through a

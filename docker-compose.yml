@@ -21,7 +21,7 @@ services:
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
 
   pgadmin:
-    # Pinned rather than :latest, same reasoning as minio below: an unpinned
+    # Pinned rather than :latest, same reasoning as s3mock below: an unpinned
     # image only fails the day it's *re*-pulled, which is never on the machine
     # that already has it cached, and always on a fresh clone or CI.
     image: dpage/pgadmin4:9.17
@@ -35,28 +35,40 @@ services:
     depends_on:
       - postgres
 
-  # Object storage for invoice PDFs. S3-compatible, so the application
-  # talks to it with the AWS SDK and only the endpoint differs from real
-  # S3. 9000 is the S3 API the app uses; 9001 is the web console for
-  # eyeballing stored objects during development.
-  minio:
-    # quay.io and a pinned tag: MinIO's Docker Hub repository no longer
-    # exists, so `image: minio/minio` only still works on a machine that
-    # pulled it before it disappeared - a fresh clone gets "repository does
-    # not exist". Pinned rather than :latest so this cannot drift again
-    # without the change being visible in a diff.
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    container_name: subscription-hub-minio
+  # S3-compatible object store for invoice PDFs, standing in for AWS S3 - the
+  # application talks to both through the plain AWS SDK with only an endpoint
+  # differing, which has now been verified against real S3.
+  #
+  # s3mock rather than MinIO. MinIO removed its community images from Docker
+  # Hub, which broke CI once; the quay.io replacement was then removed too,
+  # every tag with it, and broke CI again. Both times a developer machine kept
+  # passing from its local image cache while a fresh clone could not even start
+  # this file. What is left of MinIO is a Bitnami archive marked legacy and a
+  # Chainguard image that publishes only :latest for free, which cannot be
+  # pinned - see CLAUDE.md §5.
+  #
+  # It authenticates nothing, so STORAGE_ACCESS_KEY/SECRET_KEY only have to be
+  # non-blank: blank is what selects the AWS credential chain instead.
+  # It is also in-memory, so PDFs do not survive a restart - which is why there
+  # is no volume here, and is fine because an invoice's PDF is regenerable.
+  #
+  # The trade against MinIO is the web console that used to be on :9001.
+  # Inspect the bucket with the AWS CLI instead:
+  #   aws s3 ls s3://invoices --endpoint-url http://localhost:9000 --recursive
+  s3mock:
+    image: adobe/s3mock:3.12.0
+    container_name: subscription-hub-s3mock
     restart: unless-stopped
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    command: server /data --console-address ":9001"
+      # Created at startup, so nothing has to provision it. The application
+      # would create it lazily on first write anyway (S3InvoicePdfStorage),
+      # but having it exist keeps local behaviour closer to a deployed host,
+      # where the bucket is infrastructure and STORAGE_CREATE_BUCKET is false.
+      initialBuckets: invoices
     ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
+      # Published on 9000 so STORAGE_ENDPOINT keeps its previous value and
+      # nothing else has to change; s3mock listens on 9090 inside.
+      - "9000:9090"
 
   # Local SMTP inbox for notification emails. Mailpit is the maintained
   # successor to MailHog (unmaintained, no releases in years) and keeps the
@@ -73,7 +85,7 @@ services:
 
   # Local SQS. The notification outbox is relayed here and a listener
   # consumes it; ElasticMQ speaks the SQS API, so real SQS is only an
-  # endpoint change, the same "vendor is a config value" shape as MinIO/S3.
+  # endpoint change, the same "vendor is a config value" shape as s3mock/S3.
   # Queues are defined in elasticmq.conf as infrastructure, not created by
   # the application.
   elasticmq:
@@ -139,6 +151,5 @@ services:
 
 volumes:
   postgres_data:
-  minio_data:
   prometheus_data:
   grafana_data:
